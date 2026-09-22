@@ -16,7 +16,6 @@
 #    [9/11] Remnanode (Xray core)
 #    [10/11] Certificate auto-renewal wiring + node log rotation
 #    [11/11] Cloudflare WARP SOCKS5 egress proxy
-#    [12/12] Hysteria2 (QUIC over UDP) — hybrid TCP+UDP node
 #
 #  Usage:  ./install.sh --help
 # =============================================================================
@@ -38,9 +37,8 @@ readonly NOFILE_LIMIT=1048576
 # so DOMAIN=... ./install.sh works alongside flags and the .env file.
 : "${DOMAIN:=}" "${EMAIL:=}" "${SECRET_KEY:=}" "${SERVICE_NAME:=}" \
   "${SERVICE_IMAGE:=}" "${SERVICE_PORT:=}" "${NODE_PORT:=}" \
-  "${VALIDATION:=}" "${CF_TOKEN:=}" "${WARP_PORT:=}" \
-  "${HYSTERIA_PORT:=}" "${HYSTERIA_PASSWORD:=}"
-ENABLE_TUNE=true ENABLE_FAIL2BAN=true ENABLE_WARP=true ENABLE_HYSTERIA=true ASSUME_YES=false FORCE_OS=false
+  "${VALIDATION:=}" "${CF_TOKEN:=}" "${WARP_PORT:=}"
+ENABLE_TUNE=true ENABLE_FAIL2BAN=true ENABLE_WARP=true ASSUME_YES=false FORCE_OS=false
 CERT_SOURCE=""
 
 # --- output helpers ----------------------------------------------------------
@@ -84,14 +82,11 @@ Optional:
                               (default: standalone, TLS-ALPN-01 on port 443)
   -T, --cf-token TOKEN        Cloudflare API token (required for cloudflare)
   -w, --warp-port PORT        WARP SOCKS5 port (default: 40000)
-  -H, --hysteria-port PORT    Hysteria2 QUIC/UDP port (default: 443)
-      --hysteria-password PW  Hysteria2 auth password (default: generated)
 
 Toggles (production defaults are ON, use --no-* to disable):
   --no-tune                   Skip kernel/network sysctl tuning and fd limits
   --no-fail2ban               Skip fail2ban SSH protection
   --no-warp                   Skip Cloudflare WARP installation
-  --no-hysteria               Skip Hysteria2 installation
 
   -y, --yes                   Accept defaults, never prompt
   -f, --force                 Skip the Debian 12/13 version check
@@ -152,11 +147,6 @@ while [[ $# -gt 0 ]]; do
         --cf-token=*)      CF_TOKEN="${1#*=}"; shift ;;
         -w|--warp-port)    WARP_PORT="${2:?}"; shift 2 ;;
         --warp-port=*)     WARP_PORT="${1#*=}"; shift ;;
-        -H|--hysteria-port) HYSTERIA_PORT="${2:?}"; shift 2 ;;
-        --hysteria-port=*) HYSTERIA_PORT="${1#*=}"; shift ;;
-        --hysteria-password) HYSTERIA_PASSWORD="${2:?}"; shift 2 ;;
-        --hysteria-password=*) HYSTERIA_PASSWORD="${1#*=}"; shift ;;
-        --no-hysteria)     ENABLE_HYSTERIA=false; shift ;;
         --no-tune)         ENABLE_TUNE=false; shift ;;
         --no-fail2ban)     ENABLE_FAIL2BAN=false; shift ;;
         --no-warp)         ENABLE_WARP=false; shift ;;
@@ -220,7 +210,6 @@ is_domain() {
 is_email()  { [[ "$1" =~ ^[^[:space:]@]+@[^[:space:]@]+\.[^[:space:]@]+$ ]]; }
 is_secret() { [[ "$1" =~ ^[A-Za-z0-9_-]+$ ]] && (( ${#1} >= 16 && ${#1} <= 256 )); }
 is_port()   { [[ "$1" =~ ^[0-9]+$ ]] && (( "$1" >= 1024 && "$1" <= 65535 )); }
-is_any_port() { [[ "$1" =~ ^[0-9]+$ ]] && (( "$1" >= 1 && "$1" <= 65535 )); }
 
 interactive() { [[ -t 0 && -t 1 ]]; }
 
@@ -377,18 +366,11 @@ fi
 
 NODE_PORT="${NODE_PORT:-2222}"
 WARP_PORT="${WARP_PORT:-40000}"
-if [[ "$ENABLE_HYSTERIA" == true ]]; then
-    HYSTERIA_PORT="${HYSTERIA_PORT:-443}"
-fi
 is_port "$NODE_PORT" || die "Invalid --node-port '$NODE_PORT' (1024-65535)"
 is_port "$WARP_PORT" || die "Invalid --warp-port '$WARP_PORT' (1024-65535)"
-if [[ "$ENABLE_HYSTERIA" == true ]]; then
-    is_any_port "$HYSTERIA_PORT" || die "Invalid --hysteria-port '$HYSTERIA_PORT' (1-65535)"
-    # QUIC needs big UDP buffers — the sysctl profile already covers it (64 MB).
-    if [[ -z "$HYSTERIA_PASSWORD" && ! -f /etc/hysteria/config.yaml ]] && command -v openssl >/dev/null 2>&1; then
-        HYSTERIA_PASSWORD="$(openssl rand -hex 16)"
-    fi
-fi
+# NOTE: Hysteria2 (QUIC) runs inside the node's Xray-core with its inbound
+# pushed by the panel — no server binary is installed here. UDP buffers and
+# the 443/udp firewall rule below are what the node needs for it.
 
 # --- preflight DNS sanity (non-fatal) ------------------------------------------
 PUBLIC_IP="$(detect_public_ip || true)"
@@ -409,10 +391,8 @@ SERVICE_NAME=$SERVICE_NAME
 NODE_PORT=$NODE_PORT
 WARP_PORT=$WARP_PORT
 VALIDATION=$VALIDATION
-HYSTERIA_PORT=$HYSTERIA_PORT
 EOF
 [[ -n "$CF_TOKEN" ]] && echo "CF_TOKEN=$CF_TOKEN" >> "$ENV_FILE"
-[[ -n "$HYSTERIA_PASSWORD" ]] && echo "HYSTERIA_PASSWORD=$HYSTERIA_PASSWORD" >> "$ENV_FILE"
 chmod 600 "$ENV_FILE"
 
 echo ""
@@ -422,9 +402,6 @@ info "  email        : $EMAIL"
 info "  decoy service: $SERVICE_NAME ($SERVICE_IMAGE)"
 info "  node port    : $NODE_PORT"
 info "  validation   : $VALIDATION"
-if [[ "$ENABLE_HYSTERIA" == true ]]; then
-    info "  hysteria2    : UDP :$HYSTERIA_PORT ${HYSTERIA_PASSWORD:+(password generated/loaded)}"
-fi
 info "  tune/f2b/warp: $ENABLE_TUNE / $ENABLE_FAIL2BAN / $ENABLE_WARP"
 
 # =============================================================================
@@ -667,12 +644,8 @@ done
 ufw allow 80/tcp  comment 'ACME http-01'  >/dev/null
 ufw allow 443/tcp comment 'Xray TLS'      >/dev/null
 ufw allow "${NODE_PORT}/tcp" comment 'remnanode API' >/dev/null
-if [[ "$ENABLE_HYSTERIA" == true ]]; then
-    ufw allow "${HYSTERIA_PORT}/udp" comment 'Hysteria2 QUIC' >/dev/null
-    ok "UFW enabled: SSH $(echo $SSH_PORTS | tr '\n' ' ')(rate-limited), 80/tcp, 443/tcp, ${HYSTERIA_PORT}/udp, ${NODE_PORT}/tcp"
-else
-    ok "UFW enabled: SSH $(echo $SSH_PORTS | tr '\n' ' ')(rate-limited), 80, 443, ${NODE_PORT}"
-fi
+# 443/udp is needed by QUIC-based inbounds (e.g. Hysteria2) pushed by the panel
+ufw allow 443/udp comment 'QUIC / Hysteria2 (Xray)' >/dev/null
 ufw --force enable >/dev/null
 
 # =============================================================================
@@ -688,7 +661,7 @@ LE_LIVE_DIR="/etc/letsencrypt/live/${DOMAIN}"
 # Renewal hooks: free port 443 by briefly stopping the node, then bring it back.
 ACME_PRE_HOOK='if docker ps -a --format "{{.Names}}" 2>/dev/null | grep -qx remnanode; then docker stop remnanode >/dev/null 2>&1 || true; fi; true'
 ACME_POST_HOOK='if docker ps -a --format "{{.Names}}" 2>/dev/null | grep -qx remnanode; then docker start remnanode >/dev/null 2>&1 || true; fi; true'
-ACME_RELOADCMD='docker compose -f "/opt/remnanode/nginx/docker-compose.yml" restart >/dev/null 2>&1; docker compose -f "/opt/remnanode/docker-compose.yml" restart >/dev/null 2>&1; systemctl restart hysteria-server.service 2>/dev/null; true'
+ACME_RELOADCMD='docker compose -f "/opt/remnanode/nginx/docker-compose.yml" restart >/dev/null 2>&1; docker compose -f "/opt/remnanode/docker-compose.yml" restart >/dev/null 2>&1; true'
 
 install -d -m 755 "${NODE_DIR}/nginx"
 
@@ -909,7 +882,6 @@ case ",\${RENEWED_DOMAINS// /,}," in
     chmod 600 "${CERT_KEY}"
     docker compose -f ${NODE_DIR}/nginx/docker-compose.yml restart
     docker compose -f ${NODE_DIR}/docker-compose.yml restart
-    systemctl restart hysteria-server.service >/dev/null 2>&1 || true
     ;;
 esac
 HOOKEOF
@@ -961,21 +933,6 @@ else
 fi
 
 # =============================================================================
-step "[12/12] Hysteria2 (QUIC over UDP :${HYSTERIA_PORT})"
-# =============================================================================
-if [[ "$ENABLE_HYSTERIA" == true ]]; then
-    if [[ -f "${SCRIPT_DIR}/hysteria.sh" ]]; then
-        # shellcheck source=hysteria.sh
-        source "${SCRIPT_DIR}/hysteria.sh"
-        hysteria_setup "$HYSTERIA_PORT" "$HYSTERIA_PASSWORD"
-    else
-        warn "hysteria.sh not found next to install.sh — skipping Hysteria2."
-    fi
-else
-    info "Hysteria2 skipped (--no-hysteria)"
-fi
-
-# =============================================================================
 #  Final verification & summary
 # =============================================================================
 echo ""
@@ -996,16 +953,6 @@ else
     err "Cannot execute xray inside remnanode"
     FAIL=1
 fi
-if [[ "$ENABLE_HYSTERIA" == true ]]; then
-    if command -v hysteria >/dev/null 2>&1 \
-        && systemctl is-active --quiet hysteria-server.service \
-        && ss -uln 2>/dev/null | grep -q ":${HYSTERIA_PORT} "; then
-        ok "Hysteria2: active on UDP :${HYSTERIA_PORT}"
-    else
-        err "Hysteria2: service not active or UDP :${HYSTERIA_PORT} not listening"
-        FAIL=1
-    fi
-fi
 
 echo ""
 echo "================================================"
@@ -1021,11 +968,6 @@ echo " Decoy service    : ${SERVICE_NAME} (masked site on 443)"
 echo " Node API         : ${DOMAIN}:${NODE_PORT} (panel -> nodes, add this node)"
 echo " Certificate      : ${CERT_SOURCE}"
 echo " WARP SOCKS5      : 127.0.0.1:${WARP_PORT} (do NOT open this port!)"
-if [[ "$ENABLE_HYSTERIA" == true ]]; then
-    echo " Hysteria2        : ${DOMAIN}:${HYSTERIA_PORT}/udp"
-    echo "   client link    : hysteria2://${HYSTERIA_PASSWORD}@${DOMAIN}:${HYSTERIA_PORT}/?sni=${DOMAIN}"
-    echo "   (password also saved in ${ENV_FILE})"
-fi
 echo " Install log      : ${LOG_FILE}"
 echo "================================================"
 echo ""

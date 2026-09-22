@@ -1,8 +1,8 @@
 # 🚀 Remnawave Node Installer (Debian 12/13)
 
-Production-установщик одной командой превращает чистый сервер на **Debian 12/13** в гибридную
-VPN-ноду: Remnawave-нода с Xray поверх TCP (VLESS/REALITY) плюс сервер **Hysteria2** (QUIC/UDP),
-сайт-камуфляж на Nginx и исходящий трафик через Cloudflare WARP.
+Production-установщик одной командой превращает чистый сервер на **Debian 12/13** в ноду
+**Remnawave**: Xray поверх TCP (VLESS/REALITY) и QUIC (Hysteria2-inbound — панель сама
+заворачивает его в Xray-core ноды), сайт-камуфляж на Nginx и исходящий трафик через Cloudflare WARP.
 
 ## 📋 Что разворачивает скрипт
 
@@ -19,7 +19,7 @@ VPN-ноду: Remnawave-нода с Xray поверх TCP (VLESS/REALITY) плю
 | 9  | Remnanode | Ядро Xray под управлением панели Remnawave, высокие лимиты FD |
 | 10 | Продление и логи | При продлении сертификата нода останавливается/запускается вокруг ACME-челленджа; логи ноды ротируются |
 | 11 | Cloudflare WARP | SOCKS5-прокси для исходящего трафика на `127.0.0.1:40000` |
-| 12 | Hysteria2 | QUIC-сервер на UDP 443 с тем же TLS-сертификатом ноды, пароль генерируется автоматически, masquerade на декои-сайт |
+| 12 | Готовность к Hysteria2 | UDP 443 открыт в файрволе, QUIC-буферы затюningы; сам Hysteria2-inbound разворачивается панелью в Xray-core ноды |
 
 ## ⚙️ Production-настройки
 
@@ -96,9 +96,6 @@ sudo ./install.sh \
 | `--no-tune` | Пропустить тюнинг ядра/сети | тюнинг включён |
 | `--no-fail2ban` | Пропустить fail2ban | fail2ban включён |
 | `--no-warp` | Не устанавливать WARP | WARP включён |
-| `--no-hysteria` | Не устанавливать Hysteria2 | Hysteria2 включён |
-| `-H, --hysteria-port` | QUIC/UDP-порт Hysteria2 | `443` |
-| `--hysteria-password` | Пароль аутентификации Hysteria2 | генерируется |
 | `-y, --yes` | Ничего не спрашивать | — |
 | `-f, --force` | Пропустить проверку Debian 12/13 | — |
 | `-h, --help` | Справка | — |
@@ -109,7 +106,6 @@ sudo ./install.sh \
 - `/opt/remnanode/nginx/` — конфиг Nginx и SSL-ключи
 - `/opt/<service>/` — выбранный декои-сервис
 - `/etc/sysctl.d/99-remnanode.conf` — сетевой тюнинг
-- `/etc/hysteria/config.yaml` — конфиг сервера Hysteria2
 - `/var/log/remnanode-install.log` — полный лог установки
 
 ## ⚠️ Используемые порты
@@ -119,7 +115,7 @@ sudo ./install.sh \
 | 22   | SSH (rate-limited через UFW + fail2ban) |
 | 80   | ACME / редирект на HTTPS |
 | 443/tcp | Xray TCP (REALITY, камуфляж через nginx-сокет) |
-| 443/udp | Hysteria2 (QUIC) |
+| 443/udp | QUIC-inbounds через Xray (Hysteria2, управляется панелью) |
 | 2222 | API ноды Remnanode (панель → нода) |
 | 40000 | Cloudflare WARP SOCKS5 — **только localhost, не открывать** |
 
