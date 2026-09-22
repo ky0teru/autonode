@@ -32,10 +32,11 @@ readonly NODE_DIR="/opt/remnanode"
 readonly NOFILE_LIMIT=1048576
 
 # --- config (filled by arg parsing / env / .env / prompts) -------------------
+# NOTE: TCP (VLESS/REALITY) only — no XHTTP/gRPC transport locations.
 # "${VAR:=}" keeps an inherited environment value and defaults to empty,
 # so DOMAIN=... ./install.sh works alongside flags and the .env file.
 : "${DOMAIN:=}" "${EMAIL:=}" "${SECRET_KEY:=}" "${SERVICE_NAME:=}" \
-  "${SERVICE_IMAGE:=}" "${SERVICE_PORT:=}" "${XHTTP_PATH:=}" "${NODE_PORT:=}" \
+  "${SERVICE_IMAGE:=}" "${SERVICE_PORT:=}" "${NODE_PORT:=}" \
   "${VALIDATION:=}" "${CF_TOKEN:=}" "${WARP_PORT:=}"
 ENABLE_TUNE=true ENABLE_FAIL2BAN=true ENABLE_WARP=true ASSUME_YES=false FORCE_OS=false
 CERT_SOURCE=""
@@ -76,7 +77,6 @@ Optional:
                               excalidraw, searxng, sharry, audiobookshelf,
                               kavita, kodbox, navidrome, gitea, fluffy-web
                               (default: random)
-  -p, --xhttp-path PATH       XHTTP location path (default: /xhttppath/)
   -n, --node-port PORT        Remnanode API port (default: 2222)
   -V, --validation METHOD     Certificate method: standalone | cloudflare
                               (default: standalone, TLS-ALPN-01 on port 443)
@@ -139,8 +139,6 @@ while [[ $# -gt 0 ]]; do
         --secret-key=*)    SECRET_KEY="${1#*=}"; shift ;;
         -S|--service)      SERVICE_NAME="${2:?}"; shift 2 ;;
         --service=*)       SERVICE_NAME="${1#*=}"; shift ;;
-        -p|--xhttp-path)   XHTTP_PATH="${2:?}"; shift 2 ;;
-        --xhttp-path=*)    XHTTP_PATH="${1#*=}"; shift ;;
         -n|--node-port)    NODE_PORT="${2:?}"; shift 2 ;;
         --node-port=*)     NODE_PORT="${1#*=}"; shift ;;
         -V|--validation)   VALIDATION="${2:?}"; shift 2 ;;
@@ -211,7 +209,6 @@ is_domain() {
 }
 is_email()  { [[ "$1" =~ ^[^[:space:]@]+@[^[:space:]@]+\.[^[:space:]@]+$ ]]; }
 is_secret() { [[ "$1" =~ ^[A-Za-z0-9_-]+$ ]] && (( ${#1} >= 16 && ${#1} <= 256 )); }
-is_path()   { [[ "$1" =~ ^[a-zA-Z0-9_-][a-zA-Z0-9/_-]*$ ]]; }
 is_port()   { [[ "$1" =~ ^[0-9]+$ ]] && (( "$1" >= 1024 && "$1" <= 65535 )); }
 
 interactive() { [[ -t 0 && -t 1 ]]; }
@@ -367,12 +364,6 @@ if [[ "$VALIDATION" == "cloudflare" ]]; then
     fi
 fi
 
-# XHTTP path: default, normalize
-XHTTP_PATH="${XHTTP_PATH:-${XHTTP_PATH_DEFAULT:-/xhttppath/}}"
-if ! is_path "${XHTTP_PATH//\//}"; then die "Invalid --xhttp-path '$XHTTP_PATH'"; fi
-[[ "$XHTTP_PATH" != /* ]] && XHTTP_PATH="/$XHTTP_PATH"
-[[ "$XHTTP_PATH" != */ ]] && XHTTP_PATH="$XHTTP_PATH/"
-
 NODE_PORT="${NODE_PORT:-2222}"
 WARP_PORT="${WARP_PORT:-40000}"
 is_port "$NODE_PORT" || die "Invalid --node-port '$NODE_PORT' (1024-65535)"
@@ -394,7 +385,6 @@ EMAIL=$EMAIL
 DOMAIN=$DOMAIN
 SECRET_KEY=$SECRET_KEY
 SERVICE_NAME=$SERVICE_NAME
-XHTTP_PATH=$XHTTP_PATH
 NODE_PORT=$NODE_PORT
 WARP_PORT=$WARP_PORT
 VALIDATION=$VALIDATION
@@ -407,7 +397,6 @@ info "Configuration:"
 info "  domain       : $DOMAIN"
 info "  email        : $EMAIL"
 info "  decoy service: $SERVICE_NAME ($SERVICE_IMAGE)"
-info "  xhttp path   : $XHTTP_PATH"
 info "  node port    : $NODE_PORT"
 info "  validation   : $VALIDATION"
 info "  tune/f2b/warp: $ENABLE_TUNE / $ENABLE_FAIL2BAN / $ENABLE_WARP"
@@ -804,22 +793,6 @@ server {
     ssl_session_timeout 1d;
     ssl_session_tickets off;
 
-    # XHTTP transport (served by the node's Xray socket)
-    location ${XHTTP_PATH} {
-        client_max_body_size 0;
-        proxy_buffering off;
-        proxy_request_buffering off;
-        proxy_set_header X-Real-IP \$proxy_protocol_addr;
-        proxy_set_header X-Forwarded-For \$proxy_protocol_addr;
-        proxy_set_header Host \$host;
-        proxy_http_version 1.1;
-        proxy_set_header Connection "keep-alive";
-        client_body_timeout 5m;
-        proxy_read_timeout 315s;
-        proxy_send_timeout 5m;
-        proxy_pass http://unix:/dev/shm/xrxh.socket;
-    }
-
     # Camouflage: the decoy web service
     location / {
         proxy_pass http://127.0.0.1:8080;
@@ -996,6 +969,6 @@ echo "================================================"
 echo ""
 echo " Next steps:"
 echo "   1. In the Remnawave panel add this node: host ${DOMAIN}, port ${NODE_PORT},"
-echo "      the same SECRET_KEY, XHTTP path ${XHTTP_PATH}."
+echo "      the same SECRET_KEY."
 echo "   2. Real users' traffic exits via WARP; decoy visitors see ${SERVICE_NAME}."
 echo "   3. Re-running this script is safe (idempotent upgrade)."

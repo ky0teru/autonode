@@ -1,49 +1,68 @@
-# 🚀 Remnanode Production Installer (Debian 12/13)
+# 🚀 Remnawave Node Installer (Debian 12/13)
 
-An automated, idempotent Bash installer that deploys a **Remnawave node** with an Nginx
-camouflage proxy, a decoy web service, hardened networking and Cloudflare WARP egress —
-targeting **Debian 12 (bookworm) and 13 (trixie)** only.
+A production-grade, fully unattended Bash installer that turns a fresh **Debian 12/13**
+server into a **Remnawave VPN node**: Xray over TCP (VLESS/REALITY), an Nginx camouflage
+site, and Cloudflare WARP as the traffic egress.
 
-Runs fully unattended when flags are provided; re-running it is safe (it upgrades/re-pairs
-in place).
+## 📋 What the Script Deploys
 
-## 📋 What It Does
+| Step | Component | What you get |
+| ---- | --------- | ------------ |
+| 1  | Base system | Required packages, NTP time sync, automatic security updates |
+| 2  | Kernel & network tuning | Sysctl profile built for proxying long-lived TCP connections |
+| 3  | fail2ban | SSH brute-force protection, your IP whitelisted automatically |
+| 4  | Docker | Official repo (amd64/arm64), Compose plugin, tuned `daemon.json` |
+| 5  | Firewall | UFW: default-deny inbound, SSH auto-detected and rate-limited, only the ports the node needs |
+| 6  | SSL | Let's Encrypt via acme.sh TLS-ALPN-01 on 443, or Cloudflare DNS-01 (no open ports). Auto-renewal wired end-to-end |
+| 7  | Decoy site | A real web app (12 to choose from) served to anyone probing the domain |
+| 8  | Nginx camouflage | TLS 1.2/1.3 terminator on a unix socket behind Xray's REALITY fallback, real client IPs via PROXY protocol |
+| 9  | Remnanode | Xray core managed by the Remnawave panel, high fd limits |
+| 10 | Renewal & logs | Cert renewals stop/start the node around the ACME challenge; node logs rotated |
+| 11 | Cloudflare WARP | SOCKS5 egress proxy on `127.0.0.1:40000` for user traffic |
 
-| Step | What | Details |
-| ---- | ---- | ------- |
-| 1  | Base system | Essential packages, NTP time sync, `unattended-upgrades` (auto security patches) |
-| 2  | Kernel & network tuning | **BBR + fq**, TCP buffer/backlog tuning, conntrack headroom, `nofile` up to 1M (PAM + systemd), persistent capped journald |
-| 3  | fail2ban | SSH brute-force protection with the systemd journal backend; your current IP is whitelisted automatically |
-| 4  | Docker | Official Docker repo (with a bookworm fallback for newer Debian), Compose plugin, `json-file` log rotation + `live-restore` in `daemon.json` |
-| 5  | Firewall | UFW: SSH ports auto-detected and **rate-limited** (`limit`, not `allow`), 80/443 + node API port open |
-| 6  | SSL | acme.sh **TLS-ALPN-01 on port 443** (Let's Encrypt) or **Cloudflare DNS-01** (certbot, no open ports needed). Existing certbot/acme.sh certs are detected and reused |
-| 7  | Decoy service | One of 12 web services behind the camouflage (random or `--service`) |
-| 8  | Nginx proxy | TLS 1.2/1.3 hardening, unix-socket + PROXY protocol (real client IPs via `$proxy_protocol_addr`), XHTTP location |
-| 9  | Remnanode | Xray core, `nofile` ulimit, log rotation |
-| 10 | Renewal | acme.sh cron or certbot timer + deploy hook; renewal briefly stops/starts the node to free port 443, then syncs certs and restarts the stack |
-| 11 | WARP | Cloudflare WARP in SOCKS5 proxy mode on `127.0.0.1:40000` (egress for user traffic) |
+## ⚙️ Production-Level Settings
 
-## 🆚 What Changed vs. the Old Script
+**Network / kernel** (`/etc/sysctl.d/99-remnanode.conf`)
+- BBR congestion control + fair-queue qdisc
+- 64 MB socket buffers, tuned `tcp_rmem`/`tcp_wmem` for high-BDP links
+- `somaxconn` / `netdev_max_backlog` / SYN backlog raised for burst load
+- conntrack table sized for thousands of concurrent proxied connections
+- TCP fast open, MTU probing, no slow-start after idle, keepalives tuned for NAT
+- auto-reboot 10 s after a kernel panic
 
-- ❌ **gRPC location/transport removed entirely** (XHTTP only)
-- 🤖 **Fully scriptable**: CLI flags + env vars + `.env`, no interactive prompts required
-- 🐧 **Strict Debian 12/13 support** (other releases are rejected; repo fallback to bookworm where vendors lag)
-- 🔧 **Production tuning**: BBR+fq, buffers, conntrack, fd limits, journald caps, Docker log rotation, unattended upgrades, fail2ban, UFW rate-limiting
-- 🩹 **Fixed**: TLS-ALPN challenge moved from port 8443 (ACME servers only ever connect to 443 — renewals were broken) to 443 with stop/start hooks; ZeroSSL option dropped (it requires EAB and never worked); real client IPs now use `$proxy_protocol_addr`
+**Resource limits**
+- `nofile` = 1 048 576 at every layer: PAM `limits.d`, systemd `DefaultLimitNOFILE`, container `ulimits`
+- `fs.file-max`, inotify limits raised
+- `vm.swappiness = 10`, `vm.vfs_cache_pressure = 50`
 
-## 🛠 Prerequisites
+**Security**
+- UFW default-deny inbound; SSH ports detected from `sshd -T` and **rate-limited**, not just opened
+- fail2ban with the systemd journal backend (works on minimal installs without rsyslog)
+- `unattended-upgrades` enabled for automatic security patches
+- Strict input validation; `.env` and certificates `chmod 600`
+- TLS 1.2/1.3 only, modern ECDHE/CHACHA20 ciphers, session tickets off
+
+**Operability**
+- Fully unattended: CLI flags, env vars, or a saved `.env` — precedence `flags > env > .env > defaults`
+- Idempotent: safe to re-run for upgrades/re-pairing
+- journald persistent but capped (200 MB / 2 weeks) — small disks stay safe
+- Docker `json-file` log rotation (10 MB × 3) + `live-restore`, plus per-service limits
+- logrotate for node logs; full install log at `/var/log/remnanode-install.log`
+- Preflight checks: OS version, arch, disk, RAM, DNS → clear errors instead of half-broken installs
+
+## 🛠 Requirements
 
 - **OS:** Debian 12 or 13 (amd64/arm64), fresh install recommended
 - **Domain:** an A-record pointing to the server's IPv4
-- **Access:** root (the script re-executes itself via sudo if needed)
-- **Ports:** 22 (SSH), 80, 443 free; the node API port (default `2222`)
+- **Access:** root (the script re-executes itself via sudo)
+- **Ports:** 22 (SSH), 80, 443 free; node API port (default `2222`)
 
 ## 🚀 Installation
 
 Interactive (prompts only for what's missing):
 
 ```bash
-git clone https://github.com/x1roko/node-setup.git && cd node-setup && sudo ./install.sh
+git clone https://github.com/ky0teru/autonode.git && cd autonode && sudo ./install.sh
 ```
 
 Fully non-interactive:
@@ -57,9 +76,8 @@ sudo ./install.sh \
   --service gitea --yes
 ```
 
-Environment variables work too (`DOMAIN`, `EMAIL`, `SECRET_KEY`, `SERVICE_NAME`,
-`VALIDATION`, `CF_TOKEN`, `NODE_PORT`, `XHTTP_PATH`, `WARP_PORT`), as does the `.env`
-file created next to the script on first run. Precedence: **flags > environment > .env > defaults**.
+Environment variables (`DOMAIN`, `EMAIL`, `SECRET_KEY`, `SERVICE_NAME`, `VALIDATION`,
+`CF_TOKEN`, `NODE_PORT`, `WARP_PORT`) and the `.env` file created on first run work too.
 
 ## ⌨️ Options
 
@@ -69,12 +87,11 @@ file created next to the script on first run. Precedence: **flags > environment 
 | `-e, --email` | Email for certificate registration | *required* |
 | `-s, --secret-key` | SECRET_KEY from the Remnawave panel | *required* |
 | `-S, --service` | Decoy service name | random |
-| `-p, --xhttp-path` | XHTTP location path | `/xhttppath/` |
 | `-n, --node-port` | Remnanode API port | `2222` |
 | `-V, --validation` | `standalone` (TLS-ALPN-01) or `cloudflare` (DNS-01) | `standalone` |
 | `-T, --cf-token` | Cloudflare API token (Zone:DNS:Edit) | — |
 | `-w, --warp-port` | WARP SOCKS5 port | `40000` |
-| `--no-tune` | Skip kernel/network sysctl tuning | tuning ON |
+| `--no-tune` | Skip kernel/network tuning | tuning ON |
 | `--no-fail2ban` | Skip fail2ban | fail2ban ON |
 | `--no-warp` | Skip WARP installation | WARP ON |
 | `-y, --yes` | Never prompt | — |
@@ -84,7 +101,7 @@ file created next to the script on first run. Precedence: **flags > environment 
 ## 📂 Project Structure
 
 - `/opt/remnanode/` — node compose + config
-- `/opt/remnanode/nginx/` — Nginx config and SSL keys (`fullchain.pem`, `privkey.key`)
+- `/opt/remnanode/nginx/` — Nginx config and SSL keys
 - `/opt/<service>/` — selected decoy service
 - `/etc/sysctl.d/99-remnanode.conf` — network tuning
 - `/var/log/remnanode-install.log` — full install log
@@ -95,7 +112,7 @@ file created next to the script on first run. Precedence: **flags > environment 
 | ---- | ------- |
 | 22   | SSH (rate-limited by UFW + fail2ban) |
 | 80   | ACME / HTTP redirect |
-| 443  | Xray (REALITY, camouflage via nginx socket) |
+| 443  | Xray TCP (REALITY, camouflage via nginx socket) |
 | 2222 | Remnanode API (panel → node) |
 | 40000 | Cloudflare WARP SOCKS5 — **localhost only, do not open** |
 
