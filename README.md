@@ -88,7 +88,7 @@ Environment variables (`DOMAIN`, `EMAIL`, `SECRET_KEY`, `SERVICE_NAME`, `VALIDAT
 | ---- | ----------- | ------- |
 | `-d, --domain` | Node domain | *required* |
 | `-e, --email` | Email for certificate registration | *required* |
-| `-s, --secret-key` | SECRET_KEY from the Remnawave panel | *required* |
+| `-s, --secret-key` | SECRET_KEY — base64 JSON bundle from the panel's node page | *required* |
 | `-S, --service` | Decoy service name | random |
 | `-n, --node-port` | Remnanode API port | `2222` |
 | `-V, --validation` | `standalone` (TLS-ALPN-01) or `cloudflare` (DNS-01) | `standalone` |

@@ -87,7 +87,7 @@ sudo ./install.sh \
 | ---- | -------- | ------------ |
 | `-d, --domain` | Домен ноды | *обязательный* |
 | `-e, --email` | Email для регистрации сертификата | *обязательный* |
-| `-s, --secret-key` | SECRET_KEY из панели Remnawave | *обязательный* |
+| `-s, --secret-key` | SECRET_KEY — base64 JSON бандл со страницы ноды в панели | *обязательный* |
 | `-S, --service` | Имя декои-сервиса | случайный |
 | `-n, --node-port` | API-порт ноды | `2222` |
 | `-V, --validation` | `standalone` (TLS-ALPN-01) или `cloudflare` (DNS-01) | `standalone` |

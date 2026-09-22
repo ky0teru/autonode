@@ -77,7 +77,7 @@ Usage: sudo ./install.sh [options]
 Required (prompted interactively if omitted and run from a terminal):
   -d, --domain DOMAIN         Node domain (A-record must point to this server)
   -e, --email EMAIL           Email for certificate registration
-  -s, --secret-key KEY        SECRET_KEY from the Remnawave panel
+  -s, --secret-key KEY        SECRET_KEY: base64 JSON bundle from the panel node page
 
 Optional:
   -S, --service NAME          Decoy service: filebrowser, memos, pingvin-share,
@@ -215,7 +215,20 @@ is_domain() {
     return 0
 }
 is_email()  { [[ "$1" =~ ^[^[:space:]@]+@[^[:space:]@]+\.[^[:space:]@]+$ ]]; }
-is_secret() { [[ "$1" =~ ^[A-Za-z0-9_-]+$ ]] && (( ${#1} >= 16 && ${#1} <= 256 )); }
+# SECRET_KEY in modern Remnawave is a base64-encoded JSON bundle
+# (nodeCertPem/nodeKeyPem/caCertPem/jwtPublicKey) — see decode-node-payload.ts
+# in the node source. Validate that it decodes and contains the four keys.
+is_secret() {
+    [[ "$1" =~ ^[A-Za-z0-9+/=]+$ ]] || return 1
+    (( ${#1} >= 100 && ${#1} <= 65536 )) || return 1
+    local decoded
+    decoded="$(printf '%s' "$1" | base64 -d 2>/dev/null)" || return 1
+    local key
+    for key in nodeCertPem nodeKeyPem caCertPem jwtPublicKey; do
+        [[ "$decoded" == *"$key"* ]] || return 1
+    done
+    return 0
+}
 is_port()   { [[ "$1" =~ ^[0-9]+$ ]] && (( "$1" >= 1024 && "$1" <= 65535 )); }
 
 interactive() { [[ "$INTERACTIVE_TTY" == true ]]; }
@@ -310,12 +323,12 @@ info "Detected: ${PRETTY_NAME:-Debian} (${DPKG_ARCH}), ${RAM_MB}MB RAM, ${DISK_F
 
 require_value DOMAIN     "Enter domain (e.g. node.example.com)" is_domain
 require_value EMAIL      "Enter email (for SSL)"                is_email
-require_value SECRET_KEY "Enter SECRET_KEY (from panel)"        is_secret
+require_value SECRET_KEY "Enter SECRET_KEY (base64 JSON bundle from the panel's node page)" is_secret hidden
 
 if ! is_domain "$DOMAIN"; then die "Invalid domain: $DOMAIN"; fi
 if ! is_email "$EMAIL";  then die "Invalid email: $EMAIL"; fi
 if ! is_secret "$SECRET_KEY"; then
-    die "SECRET_KEY must be 16-256 chars of [A-Za-z0-9_-] (the value from the Remnawave panel)."
+    die "SECRET_KEY does not look like a Remnawave node payload (expected base64 JSON with nodeCertPem/nodeKeyPem/caCertPem/jwtPublicKey). Copy the whole SECRET_KEY value from the panel's node page."
 fi
 
 # --- decoy service selection --------------------------------------------------
