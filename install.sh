@@ -42,6 +42,13 @@ ENABLE_TUNE=true ENABLE_FAIL2BAN=true ENABLE_WARP=true ASSUME_YES=false FORCE_OS
 CERT_SOURCE=""
 
 # --- output helpers ----------------------------------------------------------
+# Terminal detection MUST happen before stdout/stderr are redirected into the
+# log file below — afterwards isatty() is always false.
+INTERACTIVE_TTY=false
+if [[ -t 0 && -t 1 ]]; then
+    INTERACTIVE_TTY=true
+fi
+
 if [[ -t 1 ]]; then
     readonly C_RED='\033[0;31m' C_GREEN='\033[0;32m' C_YELLOW='\033[0;33m' C_BLUE='\033[0;34m' C_OFF='\033[0m'
 else
@@ -211,7 +218,7 @@ is_email()  { [[ "$1" =~ ^[^[:space:]@]+@[^[:space:]@]+\.[^[:space:]@]+$ ]]; }
 is_secret() { [[ "$1" =~ ^[A-Za-z0-9_-]+$ ]] && (( ${#1} >= 16 && ${#1} <= 256 )); }
 is_port()   { [[ "$1" =~ ^[0-9]+$ ]] && (( "$1" >= 1024 && "$1" <= 65535 )); }
 
-interactive() { [[ -t 0 && -t 1 ]]; }
+interactive() { [[ "$INTERACTIVE_TTY" == true ]]; }
 
 require_value() { # $1 var name, $2 prompt, $3 validator name, $4 hidden?
     local __name="$1" __prompt="$2" __validator="$3" __hidden="${4:-}" __val="${!1}"
