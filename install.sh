@@ -226,15 +226,23 @@ require_value() { # $1 var name, $2 prompt, $3 validator name, $4 hidden?
     if ! interactive; then
         die "$__name is not set. Pass --$(echo "$__name" | tr '_' '-' | tr 'A-Z' 'a-z') or run from a terminal."
     fi
+    local bp_s=$'\e[200~' bp_e=$'\e[201~'
     while true; do
         if [[ "$__hidden" == "hidden" ]]; then
-            read -rs -p "$__prompt (input hidden): " __val; echo
+            read -rs -p "$__prompt (input hidden, paste works — nothing is echoed): " __val; echo
         else
             read -r -p "$__prompt: " __val
         fi
+        # Strip bracketed-paste markers: terminals wrap pasted text in
+        # ESC[200~ ... ESC[201~ and a plain `read` receives them literally.
+        [[ "$__val" == "$bp_s"* ]] && __val="${__val#"$bp_s"}"
+        [[ "$__val" == *"$bp_e" ]] && __val="${__val%"$bp_e"}"
+        __val="${__val//$'\r'/}"
+        __val="${__val#"${__val%%[![:space:]]*}"}"
+        __val="${__val%"${__val##*[![:space:]]}"}"
         [[ -z "$__val" ]] && continue
         if "$__validator" "$__val"; then break; fi
-        err "Invalid value, try again."
+        err "Invalid value (check for stray characters from the paste), try again."
     done
     printf -v "$__name" '%s' "$__val"
 }
@@ -302,7 +310,7 @@ info "Detected: ${PRETTY_NAME:-Debian} (${DPKG_ARCH}), ${RAM_MB}MB RAM, ${DISK_F
 
 require_value DOMAIN     "Enter domain (e.g. node.example.com)" is_domain
 require_value EMAIL      "Enter email (for SSL)"                is_email
-require_value SECRET_KEY "Enter SECRET_KEY (from panel)"        is_secret hidden
+require_value SECRET_KEY "Enter SECRET_KEY (from panel)"        is_secret
 
 if ! is_domain "$DOMAIN"; then die "Invalid domain: $DOMAIN"; fi
 if ! is_email "$EMAIL";  then die "Invalid email: $EMAIL"; fi
@@ -364,7 +372,8 @@ esac
 if [[ "$VALIDATION" == "cloudflare" ]]; then
     if [[ -z "$CF_TOKEN" ]]; then
         if interactive && [[ "$ASSUME_YES" != true ]]; then
-            read -rs -p "Cloudflare API Token (Zone:DNS:Edit, input hidden): " CF_TOKEN; echo
+            read -r -p "Cloudflare API Token (Zone:DNS:Edit): " CF_TOKEN
+            CF_TOKEN="${CF_TOKEN//$'\r'/}"
         else
             die "cloudflare validation requires --cf-token"
         fi
