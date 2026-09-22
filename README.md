@@ -65,7 +65,7 @@ camouflage site, and Cloudflare WARP as the traffic egress.
 Interactive (prompts only for what's missing):
 
 ```bash
-git clone https://github.com/ky0teru/autonode.git && cd autonode && sudo ./install.sh
+git clone https://github.com/ky0teru/autonode.git && cd autonode && sudo bash install.sh
 ```
 
 Fully non-interactive:

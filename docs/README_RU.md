@@ -64,7 +64,7 @@ Production-установщик одной командой превращает
 Интерактивно (спросит только недостающее):
 
 ```bash
-git clone https://github.com/ky0teru/autonode.git && cd autonode && sudo ./install.sh
+git clone https://github.com/ky0teru/autonode.git && cd autonode && sudo bash install.sh
 ```
 
 Полностью без вопросов:
