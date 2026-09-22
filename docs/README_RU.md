@@ -1,8 +1,8 @@
 # 🚀 Remnawave Node Installer (Debian 12/13)
 
-Production-установщик одной командой превращает чистый сервер на **Debian 12/13** в ноду
-**Remnawave**: Xray поверх TCP (VLESS/REALITY), сайт-камуфляж на Nginx и исходящий трафик
-через Cloudflare WARP.
+Production-установщик одной командой превращает чистый сервер на **Debian 12/13** в гибридную
+VPN-ноду: Remnawave-нода с Xray поверх TCP (VLESS/REALITY) плюс сервер **Hysteria2** (QUIC/UDP),
+сайт-камуфляж на Nginx и исходящий трафик через Cloudflare WARP.
 
 ## 📋 Что разворачивает скрипт
 
@@ -19,12 +19,14 @@ Production-установщик одной командой превращает
 | 9  | Remnanode | Ядро Xray под управлением панели Remnawave, высокие лимиты FD |
 | 10 | Продление и логи | При продлении сертификата нода останавливается/запускается вокруг ACME-челленджа; логи ноды ротируются |
 | 11 | Cloudflare WARP | SOCKS5-прокси для исходящего трафика на `127.0.0.1:40000` |
+| 12 | Hysteria2 | QUIC-сервер на UDP 443 с тем же TLS-сертификатом ноды, пароль генерируется автоматически, masquerade на декои-сайт |
 
 ## ⚙️ Production-настройки
 
 **Сеть / ядро** (`/etc/sysctl.d/99-remnanode.conf`)
 - BBR congestion control + fair-queue qdisc
-- Буферы сокетов 64 МБ, тюнинг `tcp_rmem`/`tcp_wmem` под high-BDP-каналы
+- Буферы сокетов 64 МБ, тюнинг `tcp_rmem`/`tcp_wmem` под high-BDP-каналы — в 4 раза выше
+  требуемых Hysteria2/QUIC 16 МБ UDP-буферов
 - Поднятые `somaxconn` / `netdev_max_backlog` / SYN backlog под пиковую нагрузку
 - Таблица conntrack на тысячи одновременных проксированных соединений
 - TCP fast open, MTU probing, отказ от slow start после простоя, keepalive под NAT
@@ -55,7 +57,7 @@ Production-установщик одной командой превращает
 - **ОС:** Debian 12 или 13 (amd64/arm64), желательно чистая установка
 - **Домен:** A-запись на IPv4 сервера
 - **Доступ:** root (скрипт сам перезапустится через sudo)
-- **Порты:** 22 (SSH), 80, 443 свободны; API-порт ноды (по умолчанию `2222`)
+- **Порты:** 22 (SSH), 80, 443 (TCP и UDP) свободны; API-порт ноды (по умолчанию `2222`)
 
 ## 🚀 Установка
 
@@ -94,6 +96,9 @@ sudo ./install.sh \
 | `--no-tune` | Пропустить тюнинг ядра/сети | тюнинг включён |
 | `--no-fail2ban` | Пропустить fail2ban | fail2ban включён |
 | `--no-warp` | Не устанавливать WARP | WARP включён |
+| `--no-hysteria` | Не устанавливать Hysteria2 | Hysteria2 включён |
+| `-H, --hysteria-port` | QUIC/UDP-порт Hysteria2 | `443` |
+| `--hysteria-password` | Пароль аутентификации Hysteria2 | генерируется |
 | `-y, --yes` | Ничего не спрашивать | — |
 | `-f, --force` | Пропустить проверку Debian 12/13 | — |
 | `-h, --help` | Справка | — |
@@ -104,6 +109,7 @@ sudo ./install.sh \
 - `/opt/remnanode/nginx/` — конфиг Nginx и SSL-ключи
 - `/opt/<service>/` — выбранный декои-сервис
 - `/etc/sysctl.d/99-remnanode.conf` — сетевой тюнинг
+- `/etc/hysteria/config.yaml` — конфиг сервера Hysteria2
 - `/var/log/remnanode-install.log` — полный лог установки
 
 ## ⚠️ Используемые порты
@@ -112,7 +118,8 @@ sudo ./install.sh \
 | ---- | ------ |
 | 22   | SSH (rate-limited через UFW + fail2ban) |
 | 80   | ACME / редирект на HTTPS |
-| 443  | Xray TCP (REALITY, камуфляж через nginx-сокет) |
+| 443/tcp | Xray TCP (REALITY, камуфляж через nginx-сокет) |
+| 443/udp | Hysteria2 (QUIC) |
 | 2222 | API ноды Remnanode (панель → нода) |
 | 40000 | Cloudflare WARP SOCKS5 — **только localhost, не открывать** |
 

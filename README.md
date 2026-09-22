@@ -1,8 +1,9 @@
 # 🚀 Remnawave Node Installer (Debian 12/13)
 
 A production-grade, fully unattended Bash installer that turns a fresh **Debian 12/13**
-server into a **Remnawave VPN node**: Xray over TCP (VLESS/REALITY), an Nginx camouflage
-site, and Cloudflare WARP as the traffic egress.
+server into a **hybrid VPN node**: a Remnawave node serving Xray over TCP
+(VLESS/REALITY) plus a **Hysteria2** (QUIC/UDP) server, an Nginx camouflage site, and
+Cloudflare WARP as the traffic egress.
 
 ## 📋 What the Script Deploys
 
@@ -19,12 +20,14 @@ site, and Cloudflare WARP as the traffic egress.
 | 9  | Remnanode | Xray core managed by the Remnawave panel, high fd limits |
 | 10 | Renewal & logs | Cert renewals stop/start the node around the ACME challenge; node logs rotated |
 | 11 | Cloudflare WARP | SOCKS5 egress proxy on `127.0.0.1:40000` for user traffic |
+| 12 | Hysteria2 | QUIC server on UDP 443 sharing the node's TLS certificate, auth password auto-generated, masquerade to the decoy site |
 
 ## ⚙️ Production-Level Settings
 
 **Network / kernel** (`/etc/sysctl.d/99-remnanode.conf`)
 - BBR congestion control + fair-queue qdisc
-- 64 MB socket buffers, tuned `tcp_rmem`/`tcp_wmem` for high-BDP links
+- 64 MB socket buffers, tuned `tcp_rmem`/`tcp_wmem` for high-BDP links — exceeds the
+  16 MB UDP buffer requirement of Hysteria2/QUIC by 4x
 - `somaxconn` / `netdev_max_backlog` / SYN backlog raised for burst load
 - conntrack table sized for thousands of concurrent proxied connections
 - TCP fast open, MTU probing, no slow-start after idle, keepalives tuned for NAT
@@ -55,7 +58,7 @@ site, and Cloudflare WARP as the traffic egress.
 - **OS:** Debian 12 or 13 (amd64/arm64), fresh install recommended
 - **Domain:** an A-record pointing to the server's IPv4
 - **Access:** root (the script re-executes itself via sudo)
-- **Ports:** 22 (SSH), 80, 443 free; node API port (default `2222`)
+- **Ports:** 22 (SSH), 80, 443 (TCP and UDP) free; node API port (default `2222`)
 
 ## 🚀 Installation
 
@@ -94,6 +97,9 @@ Environment variables (`DOMAIN`, `EMAIL`, `SECRET_KEY`, `SERVICE_NAME`, `VALIDAT
 | `--no-tune` | Skip kernel/network tuning | tuning ON |
 | `--no-fail2ban` | Skip fail2ban | fail2ban ON |
 | `--no-warp` | Skip WARP installation | WARP ON |
+| `--no-hysteria` | Skip Hysteria2 installation | Hysteria2 ON |
+| `-H, --hysteria-port` | Hysteria2 QUIC/UDP port | `443` |
+| `--hysteria-password` | Hysteria2 auth password | generated |
 | `-y, --yes` | Never prompt | — |
 | `-f, --force` | Skip the Debian 12/13 check | — |
 | `-h, --help` | Show help | — |
@@ -104,6 +110,7 @@ Environment variables (`DOMAIN`, `EMAIL`, `SECRET_KEY`, `SERVICE_NAME`, `VALIDAT
 - `/opt/remnanode/nginx/` — Nginx config and SSL keys
 - `/opt/<service>/` — selected decoy service
 - `/etc/sysctl.d/99-remnanode.conf` — network tuning
+- `/etc/hysteria/config.yaml` — Hysteria2 server config
 - `/var/log/remnanode-install.log` — full install log
 
 ## ⚠️ Used Ports
@@ -112,7 +119,8 @@ Environment variables (`DOMAIN`, `EMAIL`, `SECRET_KEY`, `SERVICE_NAME`, `VALIDAT
 | ---- | ------- |
 | 22   | SSH (rate-limited by UFW + fail2ban) |
 | 80   | ACME / HTTP redirect |
-| 443  | Xray TCP (REALITY, camouflage via nginx socket) |
+| 443/tcp | Xray TCP (REALITY, camouflage via nginx socket) |
+| 443/udp | Hysteria2 (QUIC) |
 | 2222 | Remnanode API (panel → node) |
 | 40000 | Cloudflare WARP SOCKS5 — **localhost only, do not open** |
 
