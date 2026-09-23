@@ -427,7 +427,8 @@ if [[ -n "$PANEL_HOST" ]]; then
     elif is_domain "$PANEL_HOST"; then
         PANEL_IPS="$(getent ahostsv4 "$PANEL_HOST" 2>/dev/null | awk '{print $1}' | sort -u || true)"
         PANEL_IPS_V6="$(getent ahostsv6 "$PANEL_HOST" 2>/dev/null | awk '{print $1}' | sort -u || true)"
-        PANEL_IPS="$(echo "$PANEL_IPS $PANEL_IPS_V6" | tr ' ' '\n' | sed '/^$/d' | sort -u | tr '\n' ' ')"
+        # drop empty entries and IPv4-mapped IPv6 duplicates (::ffff:1.2.3.4)
+        PANEL_IPS="$(echo "$PANEL_IPS $PANEL_IPS_V6" | tr ' ' '\n' | sed '/^$/d; /^::ffff:/d' | sort -u | tr '\n' ' ')"
         PANEL_IPS="${PANEL_IPS% }"
     else
         die "Invalid --panel-host '$PANEL_HOST' (expected an IP address or a domain)"
@@ -1055,7 +1056,15 @@ for svc_name in "${SERVICE_NAME}" remnanode-proxy remnanode; do
     fi
 done
 if docker exec remnanode xray version >/dev/null 2>&1; then
-    ok "Xray inside remnanode: $(docker exec remnanode xray version | head -n1 | awk '{print $2}')"
+    # `head -n1` closes the pipe early, so xray may exit via SIGPIPE — the
+    # version string is still printed; guard the pipeline so ERR trap and
+    # pipefail don't flag a successful install over it.
+    XRAY_VER="$(docker exec remnanode xray version 2>/dev/null | head -n1 | awk '{print $2}' || true)"
+    if [[ -n "$XRAY_VER" ]]; then
+        ok "Xray inside remnanode: ${XRAY_VER}"
+    else
+        warn "Could not read the Xray version (container is running; check 'docker exec remnanode xray version')."
+    fi
 else
     err "Cannot execute xray inside remnanode"
     FAIL=1
