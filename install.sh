@@ -787,24 +787,29 @@ elif [ -f "$ACME_RSA_DIR/fullchain.cer" ] && [ -f "$ACME_RSA_DIR/${DOMAIN}.key" 
 else
     if [[ "$VALIDATION" == "cloudflare" ]]; then
         echo "--- Cloudflare DNS-01 challenge (certbot) ---"
-        # Verify the token BEFORE certbot: a stale token silently loaded from
-        # .env is the most common cause of "Invalid access token" (error 9109)
-        CF_VERIFY="$(curl -4 -fsSL --max-time 15 \
-            -H "Authorization: Bearer ${CF_TOKEN}" \
-            "https://api.cloudflare.com/client/v4/user/tokens/verify" 2>/dev/null || true)"
-        if [[ "$CF_VERIFY" != *'"success":true'* ]]; then
+        # Verify the token BEFORE certbot: a stale/wrong token silently loaded
+        # from .env is the most common cause of "Invalid access token" (9109).
+        # NOTE: /user/tokens/verify is NOT used — it rejects the newer cfat_-
+        # prefixed tokens; an authenticated /zones request proves the token.
+        CF_AUTH="$(curl -4 -fsSL --max-time 15             -H "Authorization: Bearer ${CF_TOKEN}"             "https://api.cloudflare.com/client/v4/zones?per_page=1" 2>/dev/null || true)"
+        if [[ "$CF_AUTH" != *'"success":true'* ]]; then
             die "Cloudflare API token is invalid or expired.
   If CF_TOKEN in ${ENV_FILE} is left over from a previous run, fix or remove it,
   or pass a fresh token: --cf-token <TOKEN>"
         fi
-        CF_ZONE="$(curl -4 -fsSL --max-time 15 \
-            -H "Authorization: Bearer ${CF_TOKEN}" \
-            "https://api.cloudflare.com/client/v4/zones?name=${DOMAIN}" 2>/dev/null || true)"
-        if [[ "$CF_ZONE" != *'"result":[{'* ]]; then
-            die "The Cloudflare token cannot access the zone ${DOMAIN} (needs Zone:DNS:Edit permission for it).
-  If ${DOMAIN} is not in this Cloudflare account, use a token from the right account."
+        # The node domain is usually a subdomain — find the closest enclosing zone
+        CF_ZONE_NAME="$DOMAIN"
+        for _ in 1 2 3 4 5; do
+            CF_ZONE_RESP="$(curl -4 -fsSL --max-time 15                 -H "Authorization: Bearer ${CF_TOKEN}"                 "https://api.cloudflare.com/client/v4/zones?name=${CF_ZONE_NAME}" 2>/dev/null || true)"
+            [[ "$CF_ZONE_RESP" == *'"result":[{'* ]] && break
+            [[ "$CF_ZONE_NAME" == *.* ]] || break
+            CF_ZONE_NAME="${CF_ZONE_NAME#*.}"
+        done
+        if [[ "$CF_ZONE_RESP" != *'"result":[{'* ]]; then
+            die "The Cloudflare token cannot access any zone for ${DOMAIN} (needs Zone:DNS:Edit).
+  Check that the token belongs to the account holding the ${DOMAIN} zone."
         fi
-        ok "Cloudflare token verified (token + zone ${DOMAIN} access)"
+        ok "Cloudflare token verified (zone: ${CF_ZONE_NAME})"
         apt_install certbot python3-certbot-dns-cloudflare
         CF_INI="${NODE_DIR}/cloudflare.ini"
         install -m 600 /dev/null "$CF_INI"
