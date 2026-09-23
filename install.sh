@@ -37,7 +37,8 @@ readonly NOFILE_LIMIT=1048576
 # so DOMAIN=... ./install.sh works alongside flags and the .env file.
 : "${DOMAIN:=}" "${EMAIL:=}" "${SECRET_KEY:=}" "${SERVICE_NAME:=}" \
   "${SERVICE_IMAGE:=}" "${SERVICE_PORT:=}" "${NODE_PORT:=}" \
-  "${VALIDATION:=}" "${CF_TOKEN:=}" "${WARP_PORT:=}"
+  "${VALIDATION:=}" "${CF_TOKEN:=}" "${WARP_PORT:=}" "${PANEL_HOST:=}"
+PANEL_IPS=""
 ENABLE_TUNE=true ENABLE_FAIL2BAN=true ENABLE_WARP=true ASSUME_YES=false FORCE_OS=false
 CERT_SOURCE=""
 
@@ -85,6 +86,10 @@ Optional:
                               kavita, kodbox, navidrome, gitea, fluffy-web
                               (default: random)
   -n, --node-port PORT        Remnanode API port (default: 2222)
+      --panel-host HOST       Panel address (IP or domain, e.g. panel.example.com):
+                              the node API port is then open only for the panel.
+                              Use the panel server's REAL IP if its domain is
+                              behind a CDN. Omit to keep the API port open to all
   -V, --validation METHOD     Certificate method: standalone | cloudflare
                               (default: standalone, TLS-ALPN-01 on port 443)
   -T, --cf-token TOKEN        Cloudflare API token (required for cloudflare)
@@ -148,6 +153,8 @@ while [[ $# -gt 0 ]]; do
         --service=*)       SERVICE_NAME="${1#*=}"; shift ;;
         -n|--node-port)    NODE_PORT="${2:?}"; shift 2 ;;
         --node-port=*)     NODE_PORT="${1#*=}"; shift ;;
+        --panel-host)      PANEL_HOST="${2:?}"; shift 2 ;;
+        --panel-host=*)    PANEL_HOST="${1#*=}"; shift ;;
         -V|--validation)   VALIDATION="${2:?}"; shift 2 ;;
         --validation=*)    VALIDATION="${1#*=}"; shift ;;
         -T|--cf-token)     CF_TOKEN="${2:?}"; shift 2 ;;
@@ -230,6 +237,15 @@ is_secret() {
     return 0
 }
 is_port()   { [[ "$1" =~ ^[0-9]+$ ]] && (( "$1" >= 1024 && "$1" <= 65535 )); }
+is_ipaddr() {
+    if [[ "$1" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+        local o
+        for o in ${1//./ }; do (( 10#$o <= 255 )) || return 1; done
+        return 0
+    fi
+    # loose IPv6 check: hex digits and colons, at least one colon
+    [[ "$1" =~ ^[0-9a-fA-F:]{2,45}$ && "$1" == *:* ]]
+}
 
 interactive() { [[ "$INTERACTIVE_TTY" == true ]]; }
 
@@ -397,6 +413,32 @@ NODE_PORT="${NODE_PORT:-2222}"
 WARP_PORT="${WARP_PORT:-40000}"
 is_port "$NODE_PORT" || die "Invalid --node-port '$NODE_PORT' (1024-65535)"
 is_port "$WARP_PORT" || die "Invalid --warp-port '$WARP_PORT' (1024-65535)"
+
+# --- panel address: restrict the node API port to the panel server -------------
+if [[ -z "$PANEL_HOST" ]] && interactive && [[ "$ASSUME_YES" != true ]]; then
+    read -r -p "Panel address (IP or domain, e.g. panel.example.com; Enter to keep the node API open to all): " PANEL_HOST
+    PANEL_HOST="${PANEL_HOST//$'\r'/}"
+    PANEL_HOST="${PANEL_HOST#"${PANEL_HOST%%[![:space:]]*}"}"
+    PANEL_HOST="${PANEL_HOST%"${PANEL_HOST##*[![:space:]]}"}"
+fi
+if [[ -n "$PANEL_HOST" ]]; then
+    if is_ipaddr "$PANEL_HOST"; then
+        PANEL_IPS="$PANEL_HOST"
+    elif is_domain "$PANEL_HOST"; then
+        PANEL_IPS="$(getent ahostsv4 "$PANEL_HOST" 2>/dev/null | awk '{print $1}' | sort -u || true)"
+        PANEL_IPS_V6="$(getent ahostsv6 "$PANEL_HOST" 2>/dev/null | awk '{print $1}' | sort -u || true)"
+        PANEL_IPS="$(echo "$PANEL_IPS $PANEL_IPS_V6" | tr ' ' '\n' | sed '/^$/d' | sort -u | tr '\n' ' ')"
+        PANEL_IPS="${PANEL_IPS% }"
+    else
+        die "Invalid --panel-host '$PANEL_HOST' (expected an IP address or a domain)"
+    fi
+    if [[ -z "${PANEL_IPS// /}" ]]; then
+        die "Could not resolve the panel address '$PANEL_HOST'. Pass the panel server's IP directly: --panel-host <IP>"
+    fi
+    if is_domain "$PANEL_HOST"; then
+        warn "Resolved '$PANEL_HOST' -> ${PANEL_IPS}. If the panel domain is behind a CDN (Cloudflare proxy), these are CDN IPs — re-run with the panel server's real IP."
+    fi
+fi
 # NOTE: Hysteria2 (QUIC) runs inside the node's Xray-core with its inbound
 # pushed by the panel — no server binary is installed here. UDP buffers and
 # the 443/udp firewall rule below are what the node needs for it.
@@ -420,6 +462,7 @@ SERVICE_NAME=$SERVICE_NAME
 NODE_PORT=$NODE_PORT
 WARP_PORT=$WARP_PORT
 VALIDATION=$VALIDATION
+PANEL_HOST=$PANEL_HOST
 EOF
 [[ -n "$CF_TOKEN" ]] && echo "CF_TOKEN=$CF_TOKEN" >> "$ENV_FILE"
 chmod 600 "$ENV_FILE"
@@ -672,10 +715,22 @@ for p in $SSH_PORTS; do
 done
 ufw allow 80/tcp  comment 'ACME http-01'  >/dev/null
 ufw allow 443/tcp comment 'Xray TLS'      >/dev/null
-ufw allow "${NODE_PORT}/tcp" comment 'remnanode API' >/dev/null
+if [[ -n "$PANEL_IPS" ]]; then
+    # The node API answers only to the panel server; drop the open-to-all
+    # rule if a previous run created it
+    for ip in $PANEL_IPS; do
+        ufw allow from "$ip" to any port "${NODE_PORT}" proto tcp comment 'remnanode API (panel only)' >/dev/null
+    done
+    ufw delete allow "${NODE_PORT}/tcp" >/dev/null 2>&1 || true
+    PANEL_RULE_NOTE="restricted to panel"
+else
+    ufw allow "${NODE_PORT}/tcp" comment 'remnanode API' >/dev/null
+    PANEL_RULE_NOTE="open to all"
+fi
 # 443/udp is needed by QUIC-based inbounds (e.g. Hysteria2) pushed by the panel
 ufw allow 443/udp comment 'QUIC / Hysteria2 (Xray)' >/dev/null
 ufw --force enable >/dev/null
+ok "UFW enabled: SSH $(echo $SSH_PORTS | tr '\n' ' ')(rate-limited), 80/tcp, 443/tcp+udp, ${NODE_PORT}/tcp ${PANEL_RULE_NOTE}"
 
 # =============================================================================
 step "[6/11] SSL certificate for ${DOMAIN}"
@@ -994,7 +1049,11 @@ echo " INSTALLATION COMPLETE"
 echo "------------------------------------------------"
 echo " Domain           : ${DOMAIN}"
 echo " Decoy service    : ${SERVICE_NAME} (masked site on 443)"
+if [[ -n "$PANEL_IPS" ]]; then
+echo " Node API         : ${DOMAIN}:${NODE_PORT} (accepts only ${PANEL_HOST} -> ${PANEL_IPS})"
+else
 echo " Node API         : ${DOMAIN}:${NODE_PORT} (panel -> nodes, add this node)"
+fi
 echo " Certificate      : ${CERT_SOURCE}"
 echo " WARP SOCKS5      : 127.0.0.1:${WARP_PORT} (do NOT open this port!)"
 echo " Install log      : ${LOG_FILE}"

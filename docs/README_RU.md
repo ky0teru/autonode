@@ -42,6 +42,7 @@ Production-установщик одной командой превращает
 - fail2ban с бэкендом systemd journal (работает на минимальных сборках без rsyslog)
 - `unattended-upgrades` для автоматических патчей безопасности
 - Строгая валидация входных данных; `.env` и сертификаты — `chmod 600`
+- API-порт ноды можно закрыть файрволом для всех, кроме IP панели (`--panel-host`)
 - Только TLS 1.2/1.3, современные шифры ECDHE/CHACHA20, session tickets выключены
 
 **Эксплуатация**
@@ -90,6 +91,7 @@ sudo ./install.sh \
 | `-s, --secret-key` | SECRET_KEY — base64 JSON бандл со страницы ноды в панели | *обязательный* |
 | `-S, --service` | Имя декои-сервиса | случайный |
 | `-n, --node-port` | API-порт ноды | `2222` |
+| `--panel-host` | Адрес панели (IP или домен) — API-порт ноды открывается **только для панели** | не задан (API открыт всем) |
 | `-V, --validation` | `standalone` (TLS-ALPN-01) или `cloudflare` (DNS-01) | `standalone` |
 | `-T, --cf-token` | Cloudflare API token (Zone:DNS:Edit) | — |
 | `-w, --warp-port` | Порт WARP SOCKS5 | `40000` |
@@ -116,7 +118,7 @@ sudo ./install.sh \
 | 80   | ACME / редирект на HTTPS |
 | 443/tcp | Xray TCP (REALITY, камуфляж через nginx-сокет) |
 | 443/udp | QUIC-inbounds через Xray (Hysteria2, управляется панелью) |
-| 2222 | API ноды Remnanode (панель → нода) |
+| 2222 | API ноды — только с IP панели, если задан `--panel-host` |
 | 40000 | Cloudflare WARP SOCKS5 — **только localhost, не открывать** |
 
 ## 🌍 Другие языки

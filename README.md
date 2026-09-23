@@ -43,6 +43,7 @@ camouflage site, and Cloudflare WARP as the traffic egress.
 - fail2ban with the systemd journal backend (works on minimal installs without rsyslog)
 - `unattended-upgrades` enabled for automatic security patches
 - Strict input validation; `.env` and certificates `chmod 600`
+- Node API port can be firewalled to the panel's IP only (`--panel-host`)
 - TLS 1.2/1.3 only, modern ECDHE/CHACHA20 ciphers, session tickets off
 
 **Operability**
@@ -91,6 +92,7 @@ Environment variables (`DOMAIN`, `EMAIL`, `SECRET_KEY`, `SERVICE_NAME`, `VALIDAT
 | `-s, --secret-key` | SECRET_KEY — base64 JSON bundle from the panel's node page | *required* |
 | `-S, --service` | Decoy service name | random |
 | `-n, --node-port` | Remnanode API port | `2222` |
+| `--panel-host` | Panel address (IP or domain) — opens the node API port **only for the panel** | unset (API open to all) |
 | `-V, --validation` | `standalone` (TLS-ALPN-01) or `cloudflare` (DNS-01) | `standalone` |
 | `-T, --cf-token` | Cloudflare API token (Zone:DNS:Edit) | — |
 | `-w, --warp-port` | WARP SOCKS5 port | `40000` |
@@ -117,7 +119,7 @@ Environment variables (`DOMAIN`, `EMAIL`, `SECRET_KEY`, `SERVICE_NAME`, `VALIDAT
 | 80   | ACME / HTTP redirect |
 | 443/tcp | Xray TCP (REALITY, camouflage via nginx socket) |
 | 443/udp | QUIC inbounds via Xray (Hysteria2, panel-managed) |
-| 2222 | Remnanode API (panel → node) |
+| 2222 | Remnanode API — only from the panel IP when `--panel-host` is set |
 | 40000 | Cloudflare WARP SOCKS5 — **localhost only, do not open** |
 
 ## 🌍 Other Languages
