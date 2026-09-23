@@ -787,6 +787,24 @@ elif [ -f "$ACME_RSA_DIR/fullchain.cer" ] && [ -f "$ACME_RSA_DIR/${DOMAIN}.key" 
 else
     if [[ "$VALIDATION" == "cloudflare" ]]; then
         echo "--- Cloudflare DNS-01 challenge (certbot) ---"
+        # Verify the token BEFORE certbot: a stale token silently loaded from
+        # .env is the most common cause of "Invalid access token" (error 9109)
+        CF_VERIFY="$(curl -4 -fsSL --max-time 15 \
+            -H "Authorization: Bearer ${CF_TOKEN}" \
+            "https://api.cloudflare.com/client/v4/user/tokens/verify" 2>/dev/null || true)"
+        if [[ "$CF_VERIFY" != *'"success":true'* ]]; then
+            die "Cloudflare API token is invalid or expired.
+  If CF_TOKEN in ${ENV_FILE} is left over from a previous run, fix or remove it,
+  or pass a fresh token: --cf-token <TOKEN>"
+        fi
+        CF_ZONE="$(curl -4 -fsSL --max-time 15 \
+            -H "Authorization: Bearer ${CF_TOKEN}" \
+            "https://api.cloudflare.com/client/v4/zones?name=${DOMAIN}" 2>/dev/null || true)"
+        if [[ "$CF_ZONE" != *'"result":[{'* ]]; then
+            die "The Cloudflare token cannot access the zone ${DOMAIN} (needs Zone:DNS:Edit permission for it).
+  If ${DOMAIN} is not in this Cloudflare account, use a token from the right account."
+        fi
+        ok "Cloudflare token verified (token + zone ${DOMAIN} access)"
         apt_install certbot python3-certbot-dns-cloudflare
         CF_INI="${NODE_DIR}/cloudflare.ini"
         install -m 600 /dev/null "$CF_INI"
