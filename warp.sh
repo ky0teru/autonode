@@ -92,9 +92,13 @@ warp_configure() {
     # Fresh proxy state: disconnect first so mode/port changes apply cleanly
     warp_cli disconnect >/dev/null 2>&1 || true
 
-    if warp_cli registration show 2>&1 | grep -qiE "missing registration|not registered|no registration"; then
-        _warp_info "Registering this device with WARP..."
-        warp_cli registration new >/dev/null
+    # Register unless already registered. Do NOT parse `registration show`
+    # output to detect the unregistered state — its wording differs between
+    # warp-cli versions, which silently skipped registration on new installs.
+    # A redundant `registration new` just errors out harmlessly.
+    warp_cli registration new >/dev/null 2>&1 || true
+    if ! warp_cli registration show >/dev/null 2>&1; then
+        _warp_die "WARP registration failed — run 'warp-cli --accept-tos registration new' manually and check 'journalctl -u warp-svc'."
     fi
 
     _warp_info "Setting mode to proxy..."
