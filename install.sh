@@ -1436,10 +1436,27 @@ fi
 # =============================================================================
 step "[9/11] Remnanode (Xray core)"
 # =============================================================================
-if [[ "$MODE" == "combined" ]] && docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx remnanode-bootstrap; then
-    # Free port 443 for Xray: remove the temporary panel listener from phase P2
-    docker compose -f "${NODE_DIR}/nginx/bootstrap/docker-compose.yml" down >/dev/null 2>&1 || docker rm -f remnanode-bootstrap >/dev/null 2>&1 || true
-    ok "Temporary panel listener removed — port 443 handed over to Xray"
+if [[ "$MODE" == "combined" ]]; then
+    # Keep the temporary panel listener alive: until the user creates a config
+    # profile in the panel, Xray has no inbounds and nothing would listen on
+    # 443 — the panel would be unreachable. Helper commands let the user hand
+    # the port over once the node is configured and green in the panel.
+    cat > /usr/local/bin/panel-443-off <<EOF
+#!/bin/bash
+# Hand port 443 over to Xray (run AFTER the node is configured in the panel)
+docker compose -f ${NODE_DIR}/nginx/bootstrap/docker-compose.yml down
+docker restart remnanode
+EOF
+    cat > /usr/local/bin/panel-443-on <<EOF
+#!/bin/bash
+# Temporarily serve the panel on 443 (e.g. while the node has no config yet)
+docker compose -f ${NODE_DIR}/nginx/bootstrap/docker-compose.yml up -d
+EOF
+    chmod +x /usr/local/bin/panel-443-off /usr/local/bin/panel-443-on
+    if docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx remnanode-bootstrap; then
+        ok "Panel listener on 443 kept alive — until the node is configured, it serves panel/sub"
+        warn "IMPORTANT: after the node turns green in the panel, run:  panel-443-off"
+    fi
 fi
 install -d -m 755 /var/log/remnanode
 cat > "${NODE_DIR}/docker-compose.yml" <<EOF
@@ -1635,8 +1652,11 @@ echo " Next steps:"
 if [[ "$MODE" == "combined" ]]; then
 echo "   1. Open https://${PANEL_DOMAIN} and finish the superadmin setup"
 echo "      (if you have not already)."
-echo "   2. If the node was added before this script finished, press 'Restart'"
-echo "      on it in the panel — it should come online."
+echo "   2. Create a Config Profile (inbounds on port 443) and attach it to the"
+echo "      node — the panel pushes the Xray config, the node turns green."
+echo "   3. Then run:  panel-443-off   (hands port 443 over to Xray;"
+echo "      until then the temporary listener serves the panel — panel-443-on"
+echo "      brings it back if needed)."
 echo "   3. Optional: in the panel create an API token (Settings -> API Tokens)"
 echo "      and put it into ${PANEL_DIR}/.env as REMNAWAVE_API_TOKEN, then run:"
 echo "        docker compose -f ${PANEL_DIR}/docker-compose.yml up -d"
