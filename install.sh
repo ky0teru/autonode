@@ -1330,21 +1330,87 @@ docker compose -f "${NODE_DIR}/nginx/docker-compose.yml" up -d
 if [[ "$MODE" == "combined" && -z "$SECRET_KEY" ]]; then
 step "[P2/3] Pair the node with the panel"
 # =============================================================================
+    # Port 443 is still free (Xray starts in step [9]). Run a temporary
+    # bootstrap listener so the panel can be opened in a browser right now;
+    # it is removed again before the node starts.
+    install -d -m 755 "${NODE_DIR}/nginx/bootstrap"
+    cat > "${NODE_DIR}/nginx/bootstrap/nginx.conf" <<EOF
+map \$http_upgrade \$connection_upgrade {
+    default upgrade;
+    ''      close;
+}
+
+server {
+    listen 443 ssl;
+    server_name ${PANEL_DOMAIN};
+    http2 on;
+    server_tokens off;
+    ssl_certificate     /etc/nginx/panel-certs/fullchain.pem;
+    ssl_certificate_key /etc/nginx/panel-certs/privkey.key;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    location / {
+        proxy_pass http://127.0.0.1:3000;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$remote_addr;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection \$connection_upgrade;
+        proxy_read_timeout 300s;
+    }
+}
+server {
+    listen 443 ssl;
+    server_name ${SUB_DOMAIN};
+    http2 on;
+    server_tokens off;
+    ssl_certificate     /etc/nginx/panel-certs/fullchain.pem;
+    ssl_certificate_key /etc/nginx/panel-certs/privkey.key;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    location / {
+        proxy_pass http://127.0.0.1:3010;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Forwarded-Proto https;
+    }
+}
+server {
+    listen 443 ssl default_server;
+    server_tokens off;
+    ssl_certificate     /etc/nginx/panel-certs/fullchain.pem;
+    ssl_certificate_key /etc/nginx/panel-certs/privkey.key;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    return 444;
+}
+EOF
+    cat > "${NODE_DIR}/nginx/bootstrap/docker-compose.yml" <<EOF
+services:
+  bootstrap:
+    container_name: remnanode-bootstrap
+    image: nginx:stable
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ${NODE_DIR}/panel-certs:/etc/nginx/panel-certs:ro
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+EOF
+    docker compose -f "${NODE_DIR}/nginx/bootstrap/docker-compose.yml" up -d
+    ok "Temporary panel listener started on 443 (removed automatically after pairing)"
+
     echo ""
-    echo "  NOTE: https://${PANEL_DOMAIN} is NOT reachable yet — port 443 is owned"
-    echo "  by Xray, which starts in the next step. Use an SSH tunnel from your"
-    echo "  computer instead (run in a separate terminal, leave it open):"
-    echo "      ssh -L 3000:127.0.0.1:3000 root@<server_ip>"
-    echo "  then open:  http://localhost:3000"
-    echo ""
-    echo "  1. Complete the initial superadmin setup (first run)."
+    echo "  1. Open  https://${PANEL_DOMAIN}  and complete the initial superadmin"
+    echo "     setup (first run)."
     echo "  2. Go to Nodes -> Management -> '+' and create a node with:"
     echo "       address: 127.0.0.1        port: ${NODE_PORT}"
     echo "  3. On the node card press 'Copy docker-compose.yml' and copy the"
     echo "     SECRET_KEY value from it."
     echo ""
-    echo "  (After this installer finishes, the panel will also be reachable at"
-    echo "   https://${PANEL_DOMAIN} — the tunnel is only needed right now.)"
+    echo "  (After the installer finishes, the panel stays reachable at the same"
+    echo "   URL — the node's Xray takes over port 443 with SNI routing.)"
     echo ""
     require_value SECRET_KEY "Paste the node's SECRET_KEY (base64 JSON bundle)" is_secret hidden
     if ! is_secret "$SECRET_KEY"; then
@@ -1360,6 +1426,11 @@ fi
 # =============================================================================
 step "[9/11] Remnanode (Xray core)"
 # =============================================================================
+if [[ "$MODE" == "combined" ]] && docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx remnanode-bootstrap; then
+    # Free port 443 for Xray: remove the temporary panel listener from phase P2
+    docker compose -f "${NODE_DIR}/nginx/bootstrap/docker-compose.yml" down >/dev/null 2>&1 || docker rm -f remnanode-bootstrap >/dev/null 2>&1 || true
+    ok "Temporary panel listener removed — port 443 handed over to Xray"
+fi
 install -d -m 755 /var/log/remnanode
 cat > "${NODE_DIR}/docker-compose.yml" <<EOF
 services:
