@@ -1114,7 +1114,9 @@ if [[ "$MODE" == "combined" ]]; then
     PANEL_CERT_DIR="${NODE_DIR}/panel-certs"
     PANEL_CERT_KEY="${PANEL_CERT_DIR}/privkey.key"
     PANEL_CERT_PEM="${PANEL_CERT_DIR}/fullchain.pem"
-    PANEL_LE_LIVE="/etc/letsencrypt/live/${PANEL_DOMAIN}"
+    # certbot is invoked with --cert-name remnawave-panel below, so the lineage
+    # directory is fixed regardless of which domain comes first.
+    PANEL_LE_LIVE="/etc/letsencrypt/live/remnawave-panel"
     install -d -m 755 "$PANEL_CERT_DIR"
 
     if [[ -f "$PANEL_LE_LIVE/fullchain.pem" ]]; then
