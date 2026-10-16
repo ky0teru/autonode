@@ -867,7 +867,9 @@ services:
       POSTGRES_DB: remnawave
       TZ: UTC
     volumes:
-      - remnawave-db-data:/var/lib/postgresql/data
+      # postgres:18+ requires the mount at /var/lib/postgresql (it creates a
+      # major-version subdirectory inside) — /var/lib/postgresql/data is ignored
+      - remnawave-db-data:/var/lib/postgresql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U remnawave"]
       interval: 5s
