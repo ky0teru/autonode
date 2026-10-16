@@ -17,6 +17,12 @@
 #    [10/11] Certificate auto-renewal wiring + node log rotation
 #    [11/11] Cloudflare WARP SOCKS5 egress proxy
 #
+#  Two install modes (chosen at startup, or via --mode):
+#    node     — Remnanode only, panel lives on a separate server (Recommended)
+#    combined — Remnawave panel (backend + postgres + valkey + subscription
+#               page) installed on this same server, behind the same nginx
+#               camouflage via SNI routing on 443
+#
 #  Usage:  ./install.sh --help
 # =============================================================================
 set -Eeuo pipefail
@@ -29,6 +35,7 @@ readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly ENV_FILE="${SCRIPT_DIR}/.env"
 readonly LOG_FILE="/var/log/remnanode-install.log"
 readonly NODE_DIR="/opt/remnanode"
+readonly PANEL_DIR="/opt/remnawave"
 readonly NOFILE_LIMIT=1048576
 
 # --- config (filled by arg parsing / env / .env / prompts) -------------------
@@ -37,9 +44,10 @@ readonly NOFILE_LIMIT=1048576
 # so DOMAIN=... ./install.sh works alongside flags and the .env file.
 : "${DOMAIN:=}" "${EMAIL:=}" "${SECRET_KEY:=}" "${SERVICE_NAME:=}" \
   "${SERVICE_IMAGE:=}" "${SERVICE_PORT:=}" "${NODE_PORT:=}" \
-  "${VALIDATION:=}" "${CF_TOKEN:=}" "${WARP_PORT:=}" "${PANEL_HOST:=}"
+  "${VALIDATION:=}" "${CF_TOKEN:=}" "${WARP_PORT:=}" "${PANEL_HOST:=}" \
+  "${MODE:=}" "${PANEL_DOMAIN:=}" "${SUB_DOMAIN:=}"
 PANEL_IPS=""
-ENABLE_TUNE=true ENABLE_FAIL2BAN=true ENABLE_WARP=true ASSUME_YES=false FORCE_OS=false
+ENABLE_TUNE=true ENABLE_FAIL2BAN=true ENABLE_WARP="" ASSUME_YES=false FORCE_OS=false
 CERT_SOURCE=""
 
 # --- output helpers ----------------------------------------------------------
@@ -79,6 +87,17 @@ Required (prompted interactively if omitted and run from a terminal):
   -d, --domain DOMAIN         Node domain (A-record must point to this server)
   -e, --email EMAIL           Email for certificate registration
   -s, --secret-key KEY        SECRET_KEY: base64 JSON bundle from the panel node page
+                              (in combined mode: prompted later, after the panel is up)
+
+Install mode (what to install on this server):
+      --mode MODE             node | combined (default: node)
+                              node     — Remnanode only; the panel runs on a
+                                         separate server (Recommended)
+                              combined — Remnawave panel + node on this server.
+                                         Requires --validation cloudflare
+      --panel-domain DOMAIN   Panel domain, combined mode only
+                              (e.g. panel.example.com)
+      --sub-domain DOMAIN     Subscription page domain, combined mode only
 
 Optional:
   -S, --service NAME          Decoy service: filebrowser, memos, pingvin-share,
@@ -99,6 +118,7 @@ Toggles (production defaults are ON, use --no-* to disable):
   --no-tune                   Skip kernel/network sysctl tuning and fd limits
   --no-fail2ban               Skip fail2ban SSH protection
   --no-warp                   Skip Cloudflare WARP installation
+  --warp                      Force WARP installation (default in combined mode is off)
 
   -y, --yes                   Accept defaults, never prompt
   -f, --force                 Skip the Debian 12/13 version check
@@ -108,6 +128,11 @@ Non-interactive example:
   sudo ./install.sh --domain node.example.com --email me@example.com \\
        --secret-key <SECRET> --service gitea --validation cloudflare \\
        --cf-token <TOKEN> --yes
+
+Combined (panel + node on this server) example:
+  sudo ./install.sh --mode combined --domain node.example.com \\
+       --panel-domain panel.example.com --sub-domain sub.example.com \\
+       --email me@example.com --validation cloudflare --cf-token <TOKEN> --yes
 
 Environment variables (DOMAIN, EMAIL, SECRET_KEY, ...) and .env saved next to
 the script are also honored. Re-running the script is safe (idempotent).
@@ -155,6 +180,13 @@ while [[ $# -gt 0 ]]; do
         --node-port=*)     NODE_PORT="${1#*=}"; shift ;;
         --panel-host)      PANEL_HOST="${2:?}"; shift 2 ;;
         --panel-host=*)    PANEL_HOST="${1#*=}"; shift ;;
+        --mode)            MODE="${2:?}"; shift 2 ;;
+        --mode=*)          MODE="${1#*=}"; shift ;;
+        --with-panel)      MODE="combined"; shift ;;
+        --panel-domain)    PANEL_DOMAIN="${2:?}"; shift 2 ;;
+        --panel-domain=*)  PANEL_DOMAIN="${1#*=}"; shift ;;
+        --sub-domain)      SUB_DOMAIN="${2:?}"; shift 2 ;;
+        --sub-domain=*)    SUB_DOMAIN="${1#*=}"; shift ;;
         -V|--validation)   VALIDATION="${2:?}"; shift 2 ;;
         --validation=*)    VALIDATION="${1#*=}"; shift ;;
         -T|--cf-token)     CF_TOKEN="${2:?}"; shift 2 ;;
@@ -164,6 +196,7 @@ while [[ $# -gt 0 ]]; do
         --no-tune)         ENABLE_TUNE=false; shift ;;
         --no-fail2ban)     ENABLE_FAIL2BAN=false; shift ;;
         --no-warp)         ENABLE_WARP=false; shift ;;
+        --warp)            ENABLE_WARP=true; shift ;;
         -y|--yes)          ASSUME_YES=true; shift ;;
         -f|--force)        FORCE_OS=true; shift ;;
         -h|--help)         usage; exit 0 ;;
@@ -337,15 +370,42 @@ detect_public_ip() {
 echo ""
 info "Detected: ${PRETTY_NAME:-Debian} (${DPKG_ARCH}), ${RAM_MB}MB RAM, ${DISK_FREE_MB}MB free disk"
 
+# --- install mode: node only (Recommended) or panel + node on this server -----
+case "$MODE" in
+    node|combined) : ;;
+    "")
+        if interactive && [[ "$ASSUME_YES" != true ]]; then
+            echo "Where will the Remnawave panel run?"
+            echo "  1) On a separate server — install node only (Recommended)"
+            echo "  2) On this same server — install panel + node together"
+            read -r -p "Choose [1-2, default 1]: " MODE
+            [[ "$MODE" == "2" ]] && MODE="combined" || MODE="node"
+        else
+            MODE="node"
+        fi ;;
+    *) die "Invalid --mode '$MODE' (node|combined)" ;;
+esac
+
 require_value DOMAIN     "Enter domain (e.g. node.example.com)" is_domain
 require_value EMAIL      "Enter email (for SSL)"                is_email
-require_value SECRET_KEY "Enter SECRET_KEY (base64 JSON bundle from the panel's node page)" is_secret hidden
 
-if ! is_domain "$DOMAIN"; then die "Invalid domain: $DOMAIN"; fi
-if ! is_email "$EMAIL";  then die "Invalid email: $EMAIL"; fi
-if ! is_secret "$SECRET_KEY"; then
-    die "SECRET_KEY does not look like a Remnawave node payload (expected base64 JSON with nodeCertPem/nodeKeyPem/caCertPem/jwtPublicKey). Copy the whole SECRET_KEY value from the panel's node page."
+if [[ "$MODE" == "combined" ]]; then
+    require_value PANEL_DOMAIN "Enter panel domain (e.g. panel.example.com)" is_domain
+    require_value SUB_DOMAIN   "Enter subscription page domain (e.g. sub.example.com)" is_domain
+    [[ "$PANEL_DOMAIN" == "$DOMAIN" || "$SUB_DOMAIN" == "$DOMAIN" ]] \
+        && die "Panel/subscription domains must differ from the node domain ($DOMAIN)."
+    [[ "$PANEL_DOMAIN" == "$SUB_DOMAIN" ]] \
+        && die "Panel domain and subscription domain must be different."
 fi
+
+if [[ "$MODE" == "node" ]]; then
+    require_value SECRET_KEY "Enter SECRET_KEY (base64 JSON bundle from the panel's node page)" is_secret hidden
+    if ! is_secret "$SECRET_KEY"; then
+        die "SECRET_KEY does not look like a Remnawave node payload (expected base64 JSON with nodeCertPem/nodeKeyPem/caCertPem/jwtPublicKey). Copy the whole SECRET_KEY value from the panel's node page."
+    fi
+fi
+# In combined mode SECRET_KEY does not exist yet: the panel must be installed
+# and the node created in its UI first. It is prompted for in phase [P2].
 
 # --- decoy service selection --------------------------------------------------
 resolve_service() {
@@ -414,14 +474,29 @@ WARP_PORT="${WARP_PORT:-40000}"
 is_port "$NODE_PORT" || die "Invalid --node-port '$NODE_PORT' (1024-65535)"
 is_port "$WARP_PORT" || die "Invalid --warp-port '$WARP_PORT' (1024-65535)"
 
+if [[ "$MODE" == "combined" && "$VALIDATION" != "cloudflare" ]]; then
+    die "Combined mode requires Cloudflare DNS-01 certificates (--validation cloudflare): port 443 is owned by the node's Xray, so a second TLS-ALPN challenge is impossible."
+fi
+
+# WARP default: on for a pure node; off for a combined server (the panel needs
+# clean direct egress for webhooks/updates; --warp re-enables explicitly).
+if [[ -z "$ENABLE_WARP" ]]; then
+    [[ "$MODE" == "combined" ]] && ENABLE_WARP=false || ENABLE_WARP=true
+fi
+
 # --- panel address: restrict the node API port to the panel server -------------
-if [[ -z "$PANEL_HOST" ]] && interactive && [[ "$ASSUME_YES" != true ]]; then
+if [[ "$MODE" == "combined" ]]; then
+    # The panel reaches the node over loopback — no UFW rule, nothing to resolve.
+    PANEL_HOST="127.0.0.1 (this server, loopback)"
+    PANEL_IPS=""
+    PANEL_RULE_NOTE="loopback only (panel is local)"
+elif [[ -z "$PANEL_HOST" ]] && interactive && [[ "$ASSUME_YES" != true ]]; then
     read -r -p "Panel address (IP or domain, e.g. panel.example.com; Enter to keep the node API open to all): " PANEL_HOST
     PANEL_HOST="${PANEL_HOST//$'\r'/}"
     PANEL_HOST="${PANEL_HOST#"${PANEL_HOST%%[![:space:]]*}"}"
     PANEL_HOST="${PANEL_HOST%"${PANEL_HOST##*[![:space:]]}"}"
 fi
-if [[ -n "$PANEL_HOST" ]]; then
+if [[ "$MODE" != "combined" && -n "$PANEL_HOST" ]]; then
     if is_ipaddr "$PANEL_HOST"; then
         PANEL_IPS="$PANEL_HOST"
     elif is_domain "$PANEL_HOST"; then
@@ -454,8 +529,20 @@ elif [[ -n "$PUBLIC_IP" ]] && ! grep -qx "$PUBLIC_IP" <<<"$RESOLVED_IPS"; then
     warn "If the domain is behind a CDN/proxy, standalone certificate issuance will fail (use --validation cloudflare)."
 fi
 
+if [[ "$MODE" == "combined" ]]; then
+    for _pd in "$PANEL_DOMAIN" "$SUB_DOMAIN"; do
+        _pd_ips="$(getent ahostsv4 "$_pd" 2>/dev/null | awk '{print $1}' | sort -u || true)"
+        if [[ -z "$_pd_ips" ]]; then
+            warn "$_pd does not resolve — the panel will be unreachable until its DNS A-record points here."
+        elif [[ -n "$PUBLIC_IP" ]] && ! grep -qx "$PUBLIC_IP" <<<"$_pd_ips"; then
+            warn "$_pd resolves to: $(echo "$_pd_ips" | tr '\n' ' ') — but this server's IP is $PUBLIC_IP."
+        fi
+    done
+fi
+
 # --- persist configuration -------------------------------------------------------
 cat > "$ENV_FILE" <<EOF
+MODE=$MODE
 EMAIL=$EMAIL
 DOMAIN=$DOMAIN
 SECRET_KEY=$SECRET_KEY
@@ -465,12 +552,20 @@ WARP_PORT=$WARP_PORT
 VALIDATION=$VALIDATION
 PANEL_HOST=$PANEL_HOST
 EOF
+if [[ "$MODE" == "combined" ]]; then
+    cat >> "$ENV_FILE" <<EOF
+PANEL_DOMAIN=$PANEL_DOMAIN
+SUB_DOMAIN=$SUB_DOMAIN
+EOF
+fi
 [[ -n "$CF_TOKEN" ]] && echo "CF_TOKEN=$CF_TOKEN" >> "$ENV_FILE"
 chmod 600 "$ENV_FILE"
 
 echo ""
 info "Configuration:"
+info "  mode         : $MODE"
 info "  domain       : $DOMAIN"
+[[ "$MODE" == "combined" ]] && info "  panel/sub    : $PANEL_DOMAIN / $SUB_DOMAIN"
 info "  email        : $EMAIL"
 info "  decoy service: $SERVICE_NAME ($SERVICE_IMAGE)"
 info "  node port    : $NODE_PORT"
@@ -700,6 +795,154 @@ else
 fi
 
 # =============================================================================
+#  [P1] Panel stack (combined mode only): Remnawave backend + Postgres + Valkey
+#  + subscription page. All ports loopback-only — the public entry is the
+#  nginx SNI dispatch on 443 configured later.
+# =============================================================================
+if [[ "$MODE" == "combined" ]]; then
+step "[P1/3] Remnawave panel stack (Postgres, Valkey, subscription page)"
+# =============================================================================
+    APP_SECRET="$(openssl rand -hex 64 2>/dev/null || head -c 64 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+    DB_PASSWORD="$(openssl rand -hex 16 2>/dev/null || head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+    WEBHOOK_SECRET="$(openssl rand -hex 16 2>/dev/null || head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+
+    install -d -m 755 "$PANEL_DIR"
+    cat > "${PANEL_DIR}/.env" <<EOF
+APP_PORT=3000
+METRICS_PORT=3001
+APP_SECRET=${APP_SECRET}
+DATABASE_URL=postgresql://remnawave:${DB_PASSWORD}@remnawave-db:5432/remnawave
+REDIS_SOCKET=/var/run/valkey/valkey.sock
+PANEL_DOMAIN=${PANEL_DOMAIN}
+FRONT_END_DOMAIN=${PANEL_DOMAIN}
+SUB_PUBLIC_DOMAIN=${SUB_DOMAIN}
+METRICS_USER=admin
+METRICS_PASS=${DB_PASSWORD}
+WEBHOOK_SECRET_HEADER=${WEBHOOK_SECRET}
+POSTGRES_USER=remnawave
+POSTGRES_PASSWORD=${DB_PASSWORD}
+POSTGRES_DB=remnawave
+EOF
+    chmod 600 "${PANEL_DIR}/.env"
+
+    cat > "${PANEL_DIR}/docker-compose.yml" <<'EOF'
+services:
+  remnawave:
+    container_name: remnawave
+    hostname: remnawave
+    image: remnawave/backend:3
+    restart: always
+    networks:
+      - remnawave-network
+    ports:
+      - "127.0.0.1:3000:3000"
+    env_file:
+      - .env
+    depends_on:
+      - remnawave-db
+      - remnawave-valkey
+    volumes:
+      - remnawave-sockets:/var/run/valkey
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  remnawave-db:
+    container_name: remnawave-db
+    image: postgres:18
+    restart: always
+    networks:
+      - remnawave-network
+    environment:
+      POSTGRES_USER: remnawave
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: remnawave
+      TZ: UTC
+    volumes:
+      - remnawave-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U remnawave"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  remnawave-valkey:
+    container_name: remnawave-valkey
+    image: valkey/valkey:9-alpine
+    restart: always
+    networks:
+      - remnawave-network
+    command: >
+      valkey-server --port 0
+      --unixsocket /var/run/valkey/valkey.sock
+      --unixsocketperm 750
+      --save 60 1
+      --appendonly no
+    volumes:
+      - remnawave-sockets:/var/run/valkey
+      - remnawave-valkey-data:/data
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  remnawave-subscription-page:
+    container_name: remnawave-subscription
+    image: remnawave/subscription-page:latest
+    restart: always
+    networks:
+      - remnawave-network
+    ports:
+      - "127.0.0.1:3010:3010"
+    environment:
+      APP_PORT: 3010
+      REMNAWAVE_PANEL_URL: http://remnawave:3000
+      REMNAWAVE_API_TOKEN: ${REMNAWAVE_API_TOKEN:-}
+      TRUST_PROXY: 1
+    depends_on:
+      - remnawave
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  remnawave-network:
+    driver: bridge
+
+volumes:
+  remnawave-db-data:
+  remnawave-valkey-data:
+  remnawave-sockets:
+EOF
+
+    docker compose -f "${PANEL_DIR}/docker-compose.yml" up -d
+    info "Waiting for the panel API on 127.0.0.1:3000..."
+    _panel_up=""
+    for _ in $(seq 1 30); do
+        if curl -4 -fsS -o /dev/null --max-time 3 "http://127.0.0.1:3000/" 2>/dev/null; then
+            _panel_up=1; break
+        fi
+        sleep 2
+    done
+    if [[ -n "$_panel_up" ]]; then
+        ok "Panel API is up on 127.0.0.1:3000 (loopback only)"
+    else
+        warn "Panel API did not answer within 60s — it may still be migrating the database."
+        warn "Check later: docker logs remnawave"
+    fi
+fi
+
+# =============================================================================
 step "[5/11] Firewall (UFW)"
 # =============================================================================
 # Rate-limit every port sshd actually listens on (default 22)
@@ -716,7 +959,12 @@ for p in $SSH_PORTS; do
 done
 ufw allow 80/tcp  comment 'ACME http-01'  >/dev/null
 ufw allow 443/tcp comment 'Xray TLS'      >/dev/null
-if [[ -n "$PANEL_IPS" ]]; then
+if [[ "$MODE" == "combined" ]]; then
+    # The panel is on this host and reaches the node over loopback, which
+    # bypasses UFW's input policy — no public rule for the node API at all.
+    ufw delete allow "${NODE_PORT}/tcp" >/dev/null 2>&1 || true
+    PANEL_RULE_NOTE="loopback only (panel is local)"
+elif [[ -n "$PANEL_IPS" ]]; then
     # The node API answers only to the panel server; drop the open-to-all
     # rule if a previous run created it
     for ip in $PANEL_IPS; do
@@ -852,6 +1100,57 @@ fi
 chmod 600 "$CERT_KEY"
 ok "Certificate ready (source: $CERT_SOURCE)"
 
+# --- combined mode: separate certificate for the panel + subscription domains --
+# The node cert above is only served to the REALITY fallback; the panel needs
+# its own lineage because Xray owns port 443 and TLS-ALPN is impossible.
+PANEL_CERT_SOURCE=""
+if [[ "$MODE" == "combined" ]]; then
+    PANEL_CERT_DIR="${NODE_DIR}/panel-certs"
+    PANEL_CERT_KEY="${PANEL_CERT_DIR}/privkey.key"
+    PANEL_CERT_PEM="${PANEL_CERT_DIR}/fullchain.pem"
+    PANEL_LE_LIVE="/etc/letsencrypt/live/${PANEL_DOMAIN}"
+    install -d -m 755 "$PANEL_CERT_DIR"
+
+    if [[ -f "$PANEL_LE_LIVE/fullchain.pem" ]]; then
+        cp -L "$PANEL_LE_LIVE/fullchain.pem" "$PANEL_CERT_PEM"
+        cp -L "$PANEL_LE_LIVE/privkey.pem"   "$PANEL_CERT_KEY"
+        chmod 600 "$PANEL_CERT_KEY"
+        PANEL_CERT_SOURCE="letsencrypt_live"
+    elif [[ -f "$PANEL_CERT_PEM" ]]; then
+        PANEL_CERT_SOURCE="existing"
+    else
+        echo "--- Cloudflare DNS-01 challenge for the panel domains (certbot) ---"
+        # The token was verified for the node domain's zone above; walk the
+        # panel domain's zone separately — it may live in another CF account.
+        CF_PZONE_NAME="$PANEL_DOMAIN"
+        for _ in 1 2 3 4 5; do
+            CF_PZONE_RESP="$(curl -4 -fsSL --max-time 15                 -H "Authorization: Bearer ${CF_TOKEN}"                 "https://api.cloudflare.com/client/v4/zones?name=${CF_PZONE_NAME}" 2>/dev/null || true)"
+            [[ "$CF_PZONE_RESP" == *'"result":[{'* ]] && break
+            [[ "$CF_PZONE_NAME" == *.* ]] || break
+            CF_PZONE_NAME="${CF_PZONE_NAME#*.}"
+        done
+        if [[ "$CF_PZONE_RESP" != *'"result":[{'* ]]; then
+            die "The Cloudflare token cannot access any zone for ${PANEL_DOMAIN} (needs Zone:DNS:Edit)."
+        fi
+        ok "Cloudflare token verified for the panel zone: ${CF_PZONE_NAME}"
+        apt_install certbot python3-certbot-dns-cloudflare
+        if certbot certonly \
+            --dns-cloudflare \
+            --dns-cloudflare-credentials "${NODE_DIR}/cloudflare.ini" \
+            -d "$PANEL_DOMAIN" -d "$SUB_DOMAIN" \
+            --cert-name remnawave-panel \
+            --non-interactive --agree-tos -m "$EMAIL"; then
+            cp -L "$PANEL_LE_LIVE/fullchain.pem" "$PANEL_CERT_PEM"
+            cp -L "$PANEL_LE_LIVE/privkey.pem"   "$PANEL_CERT_KEY"
+            chmod 600 "$PANEL_CERT_KEY"
+            PANEL_CERT_SOURCE="letsencrypt_live"
+        else
+            die "Panel certificate issuance failed. Check the token's zone access for $PANEL_DOMAIN / $SUB_DOMAIN."
+        fi
+    fi
+    ok "Panel certificate ready (source: $PANEL_CERT_SOURCE)"
+fi
+
 # =============================================================================
 step "[7/11] Decoy service: ${SERVICE_NAME}"
 # =============================================================================
@@ -875,6 +1174,77 @@ docker compose -f "/opt/${SERVICE_NAME}/docker-compose.yml" up -d
 # =============================================================================
 step "[8/11] Nginx camouflage proxy"
 # =============================================================================
+NGINX_EXTRA_SERVERS=""
+NGINX_EXTRA_MOUNTS=""
+NGINX_DEFAULT_SERVER=""
+if [[ "$MODE" == "combined" ]]; then
+    # SNI dispatch on the shared unix-socket listener: the panel and the
+    # subscription page get their own server blocks (terminated with their own
+    # cert); every other SNI — including the node domain — falls through to the
+    # decoy default_server, exactly as in node-only mode.
+    NGINX_EXTRA_SERVERS="$(cat <<NginxEOF
+
+    # --- panel (combined mode): SNI ${PANEL_DOMAIN} -> 127.0.0.1:3000
+    server {
+        listen unix:/dev/shm/nginx.sock ssl proxy_protocol;
+        server_name ${PANEL_DOMAIN};
+        http2 on;
+        server_tokens off;
+
+        ssl_certificate     /etc/nginx/panel-certs/fullchain.pem;
+        ssl_certificate_key /etc/nginx/panel-certs/privkey.key;
+        ssl_protocols TLSv1.2 TLSv1.3;
+        ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305;
+        ssl_prefer_server_ciphers off;
+        ssl_session_cache shared:SSLP:10m;
+        ssl_session_timeout 1d;
+        ssl_session_tickets off;
+        client_max_body_size 32m;
+
+        location / {
+            proxy_pass http://127.0.0.1:3000;
+            proxy_set_header Host \$host;
+            proxy_set_header X-Real-IP \$proxy_protocol_addr;
+            proxy_set_header X-Forwarded-For \$proxy_protocol_addr;
+            proxy_set_header X-Forwarded-Proto https;
+            proxy_set_header Upgrade \$http_upgrade;
+            proxy_set_header Connection \$connection_upgrade;
+            proxy_read_timeout 300s;
+        }
+    }
+
+    # --- subscription page (combined mode): SNI ${SUB_DOMAIN} -> 127.0.0.1:3010
+    server {
+        listen unix:/dev/shm/nginx.sock ssl proxy_protocol;
+        server_name ${SUB_DOMAIN};
+        http2 on;
+        server_tokens off;
+
+        ssl_certificate     /etc/nginx/panel-certs/fullchain.pem;
+        ssl_certificate_key /etc/nginx/panel-certs/privkey.key;
+        ssl_protocols TLSv1.2 TLSv1.3;
+        ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305;
+        ssl_prefer_server_ciphers off;
+        ssl_session_cache shared:SSLS:10m;
+        ssl_session_timeout 1d;
+        ssl_session_tickets off;
+
+        location / {
+            proxy_pass http://127.0.0.1:3010;
+            proxy_set_header Host \$host;
+            proxy_set_header X-Real-IP \$proxy_protocol_addr;
+            proxy_set_header X-Forwarded-For \$proxy_protocol_addr;
+            proxy_set_header X-Forwarded-Proto https;
+            proxy_set_header Upgrade \$http_upgrade;
+            proxy_set_header Connection \$connection_upgrade;
+        }
+    }
+NginxEOF
+)"
+    NGINX_EXTRA_MOUNTS="      - ${NODE_DIR}/panel-certs:/etc/nginx/panel-certs:ro"
+    NGINX_DEFAULT_SERVER="default_server"
+fi
+
 cat > "${NODE_DIR}/nginx/nginx.conf" <<EOF
 map \$http_upgrade \$connection_upgrade {
     default upgrade;
@@ -883,15 +1253,17 @@ map \$http_upgrade \$connection_upgrade {
 
 server {
     listen 80;
-    server_name ${DOMAIN};
+    server_name ${DOMAIN}${PANEL_DOMAIN:+ ${PANEL_DOMAIN}}${SUB_DOMAIN:+ ${SUB_DOMAIN}};
     server_tokens off;
     return 301 https://\$host\$request_uri;
 }
-
+${NGINX_EXTRA_SERVERS}
 # Xray terminates TLS on :443 (REALITY) and forwards decoy traffic here over
 # a unix socket with PROXY protocol — nginx never touches the public internet.
+# Also the default_server: any SNI that is not the panel/subscription domains
+# lands on the camouflage site.
 server {
-    listen unix:/dev/shm/nginx.sock ssl proxy_protocol;
+    listen unix:/dev/shm/nginx.sock ssl proxy_protocol${NGINX_DEFAULT_SERVER:+ ${NGINX_DEFAULT_SERVER}};
     server_name ${DOMAIN};
     http2 on;
     server_tokens off;
@@ -929,6 +1301,7 @@ services:
       - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
       - ./fullchain.pem:/etc/nginx/certs/fullchain.pem:ro
       - ./privkey.key:/etc/nginx/certs/privkey.key:ro
+${NGINX_EXTRA_MOUNTS}
       - /dev/shm:/dev/shm:rw
     logging:
       driver: json-file
@@ -938,6 +1311,34 @@ services:
     command: sh -c 'rm -f /dev/shm/nginx.sock && exec nginx -g "daemon off;"'
 EOF
 docker compose -f "${NODE_DIR}/nginx/docker-compose.yml" up -d
+
+# =============================================================================
+#  [P2] Panel is up — collect the node's SECRET_KEY (combined mode only).
+#  The panel generates it only after the node exists in its UI, so a fresh
+#  combined install has to pause here. Re-runs skip this (SECRET_KEY is in .env).
+# =============================================================================
+if [[ "$MODE" == "combined" && -z "$SECRET_KEY" ]]; then
+step "[P2/3] Pair the node with the panel"
+# =============================================================================
+    echo ""
+    echo "  The panel is installed and reachable at: https://${PANEL_DOMAIN}"
+    echo ""
+    echo "  1. Open the panel, complete the initial superadmin setup (first run)."
+    echo "  2. Go to Nodes -> Management -> '+' and create a node with:"
+    echo "       address: 127.0.0.1        port: ${NODE_PORT}"
+    echo "  3. On the node card press 'Copy docker-compose.yml' and copy the"
+    echo "     SECRET_KEY value from it."
+    echo ""
+    require_value SECRET_KEY "Paste the node's SECRET_KEY (base64 JSON bundle)" is_secret hidden
+    if ! is_secret "$SECRET_KEY"; then
+        die "SECRET_KEY does not look like a Remnawave node payload (expected base64 JSON with nodeCertPem/nodeKeyPem/caCertPem/jwtPublicKey)."
+    fi
+    # Persist it so a re-run (or a resume after a failure below) skips the pause.
+    sed -i "s|^SECRET_KEY=.*|SECRET_KEY=${SECRET_KEY}|" "$ENV_FILE"
+    chmod 600 "$ENV_FILE"
+elif [[ "$MODE" == "combined" ]]; then
+    ok "SECRET_KEY already present — skipping the panel pairing pause."
+fi
 
 # =============================================================================
 step "[9/11] Remnanode (Xray core)"
@@ -993,6 +1394,19 @@ case ",\${RENEWED_DOMAINS// /,}," in
     ;;
 esac
 HOOKEOF
+if [[ "$MODE" == "combined" ]]; then
+    cat >> /etc/letsencrypt/renewal-hooks/deploy/remnanode-sync.sh <<HOOKEOF
+case ",\${RENEWED_DOMAINS// /,}," in
+  *",${PANEL_DOMAIN},"*|*",${SUB_DOMAIN},"*)
+    cp -L "${PANEL_LE_LIVE}/fullchain.pem" "${PANEL_CERT_PEM}"
+    cp -L "${PANEL_LE_LIVE}/privkey.pem" "${PANEL_CERT_KEY}"
+    chmod 600 "${PANEL_CERT_KEY}"
+    docker compose -f ${NODE_DIR}/nginx/docker-compose.yml restart
+    ;;
+esac
+HOOKEOF
+fi
+HOOKEOF
     chmod +x /etc/letsencrypt/renewal-hooks/deploy/remnanode-sync.sh
     # certbot's package ships certbot.timer — verify it is active
     systemctl is-active --quiet certbot.timer 2>/dev/null \
@@ -1046,7 +1460,9 @@ fi
 echo ""
 step "Verification"
 FAIL=0
-for svc_name in "${SERVICE_NAME}" remnanode-proxy remnanode; do
+COMBINED_CONTAINERS=()
+[[ "$MODE" == "combined" ]] && COMBINED_CONTAINERS=(remnawave remnawave-db remnawave-valkey remnawave-subscription)
+for svc_name in "${SERVICE_NAME}" remnanode-proxy remnanode "${COMBINED_CONTAINERS[@]}"; do
     STATE="$(docker inspect -f '{{.State.Status}}' "$svc_name" 2>/dev/null || echo missing)"
     if [[ "$STATE" == "running" ]]; then
         ok "container ${svc_name}: running"
@@ -1069,6 +1485,21 @@ else
     err "Cannot execute xray inside remnanode"
     FAIL=1
 fi
+if [[ "$MODE" == "combined" ]]; then
+    if curl -4 -fsS -o /dev/null --max-time 5 "http://127.0.0.1:3000/" 2>/dev/null; then
+        ok "Panel API: http://127.0.0.1:3000 (loopback)"
+    else
+        err "Panel API is not answering on 127.0.0.1:3000 — check 'docker logs remnawave'"
+        FAIL=1
+    fi
+    PANEL_SNI_CERT="$(echo 2>/dev/null | openssl s_client -connect 127.0.0.1:443 -servername "$PANEL_DOMAIN" 2>/dev/null | openssl x509 -noout -subject 2>/dev/null || true)"
+    if grep -q "$PANEL_DOMAIN" <<<"$PANEL_SNI_CERT"; then
+        ok "SNI ${PANEL_DOMAIN} on :443 serves the panel certificate"
+    else
+        warn "SNI ${PANEL_DOMAIN} on :443 did not return the panel certificate (${PANEL_SNI_CERT:-no response})."
+        warn "If it persists, check the node's fallback config in the panel (must forward all rejected TLS to the camouflage)."
+    fi
+fi
 
 echo ""
 echo "================================================"
@@ -1079,20 +1510,48 @@ if (( FAIL )); then
 fi
 echo " INSTALLATION COMPLETE"
 echo "------------------------------------------------"
+echo " Mode             : ${MODE}"
 echo " Domain           : ${DOMAIN}"
 echo " Decoy service    : ${SERVICE_NAME} (masked site on 443)"
+if [[ "$MODE" == "combined" ]]; then
+echo " Panel            : https://${PANEL_DOMAIN} (SNI-routed on 443)"
+echo " Subscription     : https://${SUB_DOMAIN}"
+echo " Node API         : 127.0.0.1:${NODE_PORT} (loopback only — no public port)"
+echo " Panel cert       : ${PANEL_CERT_SOURCE}"
+else
 if [[ -n "$PANEL_IPS" ]]; then
 echo " Node API         : ${DOMAIN}:${NODE_PORT} (accepts only ${PANEL_HOST} -> ${PANEL_IPS})"
 else
 echo " Node API         : ${DOMAIN}:${NODE_PORT} (panel -> nodes, add this node)"
 fi
+fi
 echo " Certificate      : ${CERT_SOURCE}"
+if [[ "$ENABLE_WARP" == true ]]; then
 echo " WARP SOCKS5      : 127.0.0.1:${WARP_PORT} (do NOT open this port!)"
+else
+echo " WARP SOCKS5      : disabled"
+fi
 echo " Install log      : ${LOG_FILE}"
 echo "================================================"
 echo ""
 echo " Next steps:"
+if [[ "$MODE" == "combined" ]]; then
+echo "   1. Open https://${PANEL_DOMAIN} and finish the superadmin setup"
+echo "      (if you have not already)."
+echo "   2. If the node was added before this script finished, press 'Restart'"
+echo "      on it in the panel — it should come online."
+echo "   3. Optional: in the panel create an API token (Settings -> API Tokens)"
+echo "      and put it into ${PANEL_DIR}/.env as REMNAWAVE_API_TOKEN, then run:"
+echo "        docker compose -f ${PANEL_DIR}/docker-compose.yml up -d"
+echo "      (this enables the subscription page at https://${SUB_DOMAIN})."
+if [[ "$ENABLE_WARP" == true ]]; then
+echo "   4. WARP is installed but the panel needs direct egress — enable it per"
+echo "      outbound in the panel routing config if required."
+fi
+echo "   5. Re-running this script is safe (idempotent upgrade)."
+else
 echo "   1. In the Remnawave panel add this node: host ${DOMAIN}, port ${NODE_PORT},"
 echo "      the same SECRET_KEY."
 echo "   2. Real users' traffic exits via WARP; decoy visitors see ${SERVICE_NAME}."
 echo "   3. Re-running this script is safe (idempotent upgrade)."
+fi

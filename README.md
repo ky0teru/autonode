@@ -83,13 +83,54 @@ sudo ./install.sh \
 Environment variables (`DOMAIN`, `EMAIL`, `SECRET_KEY`, `SERVICE_NAME`, `VALIDATION`,
 `CF_TOKEN`, `NODE_PORT`, `WARP_PORT`) and the `.env` file created on first run work too.
 
+## 🖥 Panel on the same server (combined mode)
+
+At startup the installer asks where the Remnawave panel runs. The default —
+**a separate server, node only** — is recommended. To install the panel and the
+node on one server choose option `2` (or pass `--mode combined`):
+
+```bash
+sudo ./install.sh --mode combined \
+  --domain node.example.com \
+  --panel-domain panel.example.com \
+  --sub-domain sub.example.com \
+  --email me@example.com \
+  --validation cloudflare --cf-token <CLOUDFLARE_API_TOKEN> --yes
+```
+
+What combined mode does differently:
+
+- Installs the Remnawave panel stack (`remnawave/backend:3`, PostgreSQL, Valkey,
+  subscription page) in `/opt/remnawave/` — every port bound to `127.0.0.1`.
+- Issues a **separate Let's Encrypt certificate** for the panel + subscription
+  domains via Cloudflare DNS-01 (TLS-ALPN is impossible — Xray owns port 443).
+  `--validation cloudflare` is therefore **required** in combined mode.
+- Adds SNI routing to the existing camouflage nginx: requests with the panel or
+  subscription SNI are proxied to the panel/subscription page with their own
+  certificate; every other SNI (including the node domain) still lands on the
+  decoy site, so the camouflage looks unchanged.
+- The node API port stays **closed to the internet** — the panel reaches the
+  node over loopback (`127.0.0.1:2222`).
+- WARP is **off** by default (the panel needs direct egress); re-enable with `--warp`.
+- SECRET_KEY chicken-and-egg: after the panel is up the installer pauses and
+  asks you to create the superadmin account and a node in the panel UI
+  (address `127.0.0.1`, port `2222`), then paste the node's SECRET_KEY.
+  Re-runs with `SECRET_KEY` in `.env` skip this pause.
+
+After installation: open `https://panel.example.com`, finish the setup (if not
+done during the pause), and optionally create an API token to activate the
+subscription page — see the installer's final "Next steps".
+
 ## ⌨️ Options
 
 | Flag | Description | Default |
 | ---- | ----------- | ------- |
 | `-d, --domain` | Node domain | *required* |
 | `-e, --email` | Email for certificate registration | *required* |
-| `-s, --secret-key` | SECRET_KEY — base64 JSON bundle from the panel's node page | *required* |
+| `-s, --secret-key` | SECRET_KEY — base64 JSON bundle from the panel's node page | *required* (node mode) |
+| `--mode` | `node` (panel on a separate server) or `combined` (panel + node here) | `node` |
+| `--panel-domain` | Panel domain (combined mode) | *required in combined* |
+| `--sub-domain` | Subscription page domain (combined mode) | *required in combined* |
 | `-S, --service` | Decoy service name | random |
 | `-n, --node-port` | Remnanode API port | `2222` |
 | `--panel-host` | Panel address (IP or domain) — opens the node API port **only for the panel** | unset (API open to all) |
@@ -98,7 +139,8 @@ Environment variables (`DOMAIN`, `EMAIL`, `SECRET_KEY`, `SERVICE_NAME`, `VALIDAT
 | `-w, --warp-port` | WARP SOCKS5 port | `40000` |
 | `--no-tune` | Skip kernel/network tuning | tuning ON |
 | `--no-fail2ban` | Skip fail2ban | fail2ban ON |
-| `--no-warp` | Skip WARP installation | WARP ON |
+| `--no-warp` | Skip WARP installation | WARP ON (OFF in combined mode) |
+| `--warp` | Force WARP installation | — |
 | `-y, --yes` | Never prompt | — |
 | `-f, --force` | Skip the Debian 12/13 check | — |
 | `-h, --help` | Show help | — |
@@ -107,6 +149,8 @@ Environment variables (`DOMAIN`, `EMAIL`, `SECRET_KEY`, `SERVICE_NAME`, `VALIDAT
 
 - `/opt/remnanode/` — node compose + config
 - `/opt/remnanode/nginx/` — Nginx config and SSL keys
+- `/opt/remnanode/panel-certs/` — panel/subscription certificate (combined mode)
+- `/opt/remnawave/` — panel compose + env (combined mode)
 - `/opt/<service>/` — selected decoy service
 - `/etc/sysctl.d/99-remnanode.conf` — network tuning
 - `/var/log/remnanode-install.log` — full install log
@@ -119,7 +163,8 @@ Environment variables (`DOMAIN`, `EMAIL`, `SECRET_KEY`, `SERVICE_NAME`, `VALIDAT
 | 80   | ACME / HTTP redirect |
 | 443/tcp | Xray TCP (REALITY, camouflage via nginx socket) |
 | 443/udp | QUIC inbounds via Xray (Hysteria2, panel-managed) |
-| 2222 | Remnanode API — only from the panel IP when `--panel-host` is set |
+| 2222 | Remnanode API — only from the panel IP when `--panel-host` is set; loopback-only in combined mode |
+| 3000 / 3010 | Panel API / subscription page (combined mode) — **localhost only, proxied via 443 SNI** |
 | 40000 | Cloudflare WARP SOCKS5 — **localhost only, do not open** |
 
 ## 🌍 Other Languages
