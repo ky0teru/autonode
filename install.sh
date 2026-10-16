@@ -1329,13 +1329,20 @@ if [[ "$MODE" == "combined" && -z "$SECRET_KEY" ]]; then
 step "[P2/3] Pair the node with the panel"
 # =============================================================================
     echo ""
-    echo "  The panel is installed and reachable at: https://${PANEL_DOMAIN}"
+    echo "  NOTE: https://${PANEL_DOMAIN} is NOT reachable yet — port 443 is owned"
+    echo "  by Xray, which starts in the next step. Use an SSH tunnel from your"
+    echo "  computer instead (run in a separate terminal, leave it open):"
+    echo "      ssh -L 3000:127.0.0.1:3000 root@<server_ip>"
+    echo "  then open:  http://localhost:3000"
     echo ""
-    echo "  1. Open the panel, complete the initial superadmin setup (first run)."
+    echo "  1. Complete the initial superadmin setup (first run)."
     echo "  2. Go to Nodes -> Management -> '+' and create a node with:"
     echo "       address: 127.0.0.1        port: ${NODE_PORT}"
     echo "  3. On the node card press 'Copy docker-compose.yml' and copy the"
     echo "     SECRET_KEY value from it."
+    echo ""
+    echo "  (After this installer finishes, the panel will also be reachable at"
+    echo "   https://${PANEL_DOMAIN} — the tunnel is only needed right now.)"
     echo ""
     require_value SECRET_KEY "Paste the node's SECRET_KEY (base64 JSON bundle)" is_secret hidden
     if ! is_secret "$SECRET_KEY"; then
