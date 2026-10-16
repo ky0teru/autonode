@@ -445,9 +445,15 @@ SERVICE_IMAGE="$(echo "$SELECTED_SERVICE" | cut -d'|' -f2)"
 SERVICE_PORT="$(echo "$SELECTED_SERVICE" | cut -d'|' -f3)"
 
 # --- remaining options ---------------------------------------------------------
+if [[ "$MODE" == "combined" && "$VALIDATION" == "standalone" ]]; then
+    die "Combined mode cannot use standalone (TLS-ALPN) certificates: port 443 belongs to the node's Xray. Use --validation cloudflare."
+fi
 case "$VALIDATION" in
     standalone|cloudflare) : ;;
-    "") if interactive && [[ "$ASSUME_YES" != true ]]; then
+    "") if [[ "$MODE" == "combined" ]]; then
+            VALIDATION="cloudflare"
+            info "Combined mode: using Cloudflare DNS-01 certificates (TLS-ALPN is impossible — Xray owns port 443)."
+        elif interactive && [[ "$ASSUME_YES" != true ]]; then
             echo "SSL validation method:"
             echo "  1) standalone  — TLS-ALPN-01 on port 443 (needs the domain to point here)"
             echo "  2) cloudflare  — DNS-01 via Cloudflare API token (no inbound port needed)"
