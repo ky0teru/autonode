@@ -813,6 +813,8 @@ step "[P1/3] Remnawave panel stack (Postgres, Valkey, subscription page)"
     if [[ -f "${PANEL_DIR}/.env" ]] && grep -q '^APP_SECRET=' "${PANEL_DIR}/.env"; then
         # shellcheck source=/dev/null
         . "${PANEL_DIR}/.env"
+        # the saved .env stores the password as POSTGRES_PASSWORD — map it back
+        DB_PASSWORD="${DB_PASSWORD:-${POSTGRES_PASSWORD:-}}"
         info "Existing panel secrets reused from ${PANEL_DIR}/.env"
     else
         APP_SECRET="$(openssl rand -hex 64 2>/dev/null || head -c 64 /dev/urandom | od -An -tx1 | tr -d ' \n')"
