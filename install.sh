@@ -1502,7 +1502,6 @@ case ",\${RENEWED_DOMAINS// /,}," in
 esac
 HOOKEOF
 fi
-HOOKEOF
     chmod +x /etc/letsencrypt/renewal-hooks/deploy/remnanode-sync.sh
     # certbot's package ships certbot.timer — verify it is active
     systemctl is-active --quiet certbot.timer 2>/dev/null \
