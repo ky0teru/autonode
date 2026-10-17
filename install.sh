@@ -978,10 +978,20 @@ done
 ufw allow 80/tcp  comment 'ACME http-01'  >/dev/null
 ufw allow 443/tcp comment 'Xray TLS'      >/dev/null
 if [[ "$MODE" == "combined" ]]; then
-    # The panel is on this host and reaches the node over loopback, which
-    # bypasses UFW's input policy — no public rule for the node API at all.
+    # The panel runs in a container on the compose bridge: it reaches the
+    # host-networked node via the bridge gateway IP, and that traffic hits
+    # UFW's input chain. Allow it from the gateway only.
+    PANEL_GW="$(docker exec remnawave ip route 2>/dev/null | awk '/default/{print $3}' || true)"
     ufw delete allow "${NODE_PORT}/tcp" >/dev/null 2>&1 || true
-    PANEL_RULE_NOTE="loopback only (panel is local)"
+    if [[ -n "$PANEL_GW" ]]; then
+        ufw allow from "$PANEL_GW" to any port "${NODE_PORT}" proto tcp comment 'remnanode API (panel via docker gw)' >/dev/null
+        PANEL_RULE_NOTE="restricted to panel container gw ${PANEL_GW}"
+    else
+        # Panel stack did not come up — fall back to an open port so pairing
+        # still works; tighten it later with a firewall rule for the gw IP.
+        ufw allow "${NODE_PORT}/tcp" comment 'remnanode API' >/dev/null
+        PANEL_RULE_NOTE="open to all (panel container gw not detected)"
+    fi
 elif [[ -n "$PANEL_IPS" ]]; then
     # The node API answers only to the panel server; drop the open-to-all
     # rule if a previous run created it
