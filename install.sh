@@ -947,7 +947,9 @@ EOF
     info "Waiting for the panel API on 127.0.0.1:3000..."
     _panel_up=""
     for _ in $(seq 1 30); do
-        if curl -4 -fsS -o /dev/null --max-time 3 "http://127.0.0.1:3000/" 2>/dev/null; then
+        # any HTTP code (even 403 from ProxyCheckMiddleware) means "up"
+        _panel_code="$(curl -4 -s -o /dev/null -w '%{http_code}' --max-time 3 "http://127.0.0.1:3000/" 2>/dev/null || true)"
+        if [[ -n "$_panel_code" && "$_panel_code" != "000" ]]; then
             _panel_up=1; break
         fi
         sleep 2
@@ -1615,8 +1617,11 @@ else
     FAIL=1
 fi
 if [[ "$MODE" == "combined" ]]; then
-    if curl -4 -fsS -o /dev/null --max-time 5 "http://127.0.0.1:3000/" 2>/dev/null; then
-        ok "Panel API: http://127.0.0.1:3000 (loopback)"
+    # The panel rejects un-proxied requests (ProxyCheckMiddleware wants
+    # X-Forwarded-Proto https), so ANY http code — even 403 — proves it is up.
+    _panel_code="$(curl -4 -s -o /dev/null -w '%{http_code}' --max-time 5 "http://127.0.0.1:3000/" 2>/dev/null || true)"
+    if [[ -n "$_panel_code" && "$_panel_code" != "000" ]]; then
+        ok "Panel API: http://127.0.0.1:3000 (loopback, HTTP ${_panel_code})"
     else
         err "Panel API is not answering on 127.0.0.1:3000 — check 'docker logs remnawave'"
         FAIL=1
