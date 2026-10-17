@@ -954,6 +954,8 @@ EOF
     done
     if [[ -n "$_panel_up" ]]; then
         ok "Panel API is up on 127.0.0.1:3000 (loopback only)"
+        # bridge gateway the panel uses to reach the host-networked node
+        PANEL_GW="$(docker exec remnawave ip route 2>/dev/null | awk '/default/{print $3}' || true)"
     else
         warn "Panel API did not answer within 60s — it may still be migrating the database."
         warn "Check later: docker logs remnawave"
@@ -1425,7 +1427,10 @@ EOF
     echo "  1. Open  https://${PANEL_DOMAIN}  and complete the initial superadmin"
     echo "     setup (first run)."
     echo "  2. Go to Nodes -> Management -> '+' and create a node with:"
-    echo "       address: 127.0.0.1        port: ${NODE_PORT}"
+    echo "       address: ${PANEL_GW:-<docker gw, see below>}        port: ${NODE_PORT}"
+    echo "     (the docker bridge gateway — NOT 127.0.0.1: the panel lives in a"
+    echo "      container, its loopback is not this host. Get it anytime with:"
+    echo "      docker exec remnawave ip route | awk '/default/{print \$3}')"
     echo "  3. On the node card press 'Copy docker-compose.yml' and copy the"
     echo "     SECRET_KEY value from it."
     echo ""
