@@ -957,7 +957,7 @@ EOF
     if [[ -n "$_panel_up" ]]; then
         ok "Panel API is up on 127.0.0.1:3000 (loopback only)"
         # bridge gateway the panel uses to reach the host-networked node
-        PANEL_GW="$(docker exec remnawave ip route 2>/dev/null | awk '/default/{print $3}' || true)"
+        PANEL_GW="$(docker inspect remnawave --format "{{range $k,$v := .NetworkSettings.Networks}}{{$v.Gateway}}{{end}}" 2>/dev/null || true)"
     else
         warn "Panel API did not answer within 60s — it may still be migrating the database."
         warn "Check later: docker logs remnawave"
@@ -985,7 +985,7 @@ if [[ "$MODE" == "combined" ]]; then
     # The panel runs in a container on the compose bridge: it reaches the
     # host-networked node via the bridge gateway IP, and that traffic hits
     # UFW's input chain. Allow it from the gateway only.
-    PANEL_GW="$(docker exec remnawave ip route 2>/dev/null | awk '/default/{print $3}' || true)"
+    PANEL_GW="$(docker inspect remnawave --format "{{range $k,$v := .NetworkSettings.Networks}}{{$v.Gateway}}{{end}}" 2>/dev/null || true)"
     ufw delete allow "${NODE_PORT}/tcp" >/dev/null 2>&1 || true
     if [[ -n "$PANEL_GW" ]]; then
         ufw allow from "$PANEL_GW" to any port "${NODE_PORT}" proto tcp comment 'remnanode API (panel via docker gw)' >/dev/null
