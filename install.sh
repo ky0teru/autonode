@@ -824,20 +824,6 @@ fi
 if [[ "$MODE" == "combined" ]]; then
 step "[P1/3] Remnawave panel stack (Postgres, Valkey, subscription page)"
 # =============================================================================
-    # Secrets are generated ONCE: Postgres stores the password from the very
-    # first initdb in its volume, so regenerating on re-runs would break auth.
-    if [[ -f "${PANEL_DIR}/.env" ]] && grep -q '^APP_SECRET=' "${PANEL_DIR}/.env"; then
-        # shellcheck source=/dev/null
-        . "${PANEL_DIR}/.env"
-        # the saved .env stores the password as POSTGRES_PASSWORD — map it back
-        DB_PASSWORD="${DB_PASSWORD:-${POSTGRES_PASSWORD:-}}"
-        info "Existing panel secrets reused from ${PANEL_DIR}/.env"
-    else
-        APP_SECRET="$(openssl rand -hex 64 2>/dev/null || head -c 64 /dev/urandom | od -An -tx1 | tr -d ' \n')"
-        DB_PASSWORD="$(openssl rand -hex 16 2>/dev/null || head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
-        WEBHOOK_SECRET="$(openssl rand -hex 16 2>/dev/null || head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
-    fi
-
     # Production layout per the official docs (docs.rw/install):
     #   /opt/remnawave/                  — panel (docker-compose.yml + .env)
     #   /opt/remnawave/subscription/     — subscription page (own compose + .env)
