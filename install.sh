@@ -847,13 +847,18 @@ step "[P1/3] Remnawave panel stack (Postgres, Valkey, subscription page)"
 
     # Secrets are generated ONCE: Postgres stores the password from the very
     # first initdb in its volume, so regenerating on re-runs would break auth.
+    # The .env is written for docker compose and may contain values that are
+    # NOT valid shell (e.g. unquoted arrays), so it is parsed with grep instead
+    # of sourced — sourcing it aborts the installer.
+    _envget() { grep -E "^${1}=" "$2" 2>/dev/null | head -n1 | cut -d= -f2- | tr -d '"' || true; }
     if [[ -f "${PANEL_DIR}/.env" ]] && grep -q '^APP_SECRET=' "${PANEL_DIR}/.env"; then
-        # quote unquoted bracket values — older .env revisions break when sourced
-        sed -i 's/^BANDWIDTH_USAGE_NOTIFICATIONS_THRESHOLD=\([^"].*\)$/BANDWIDTH_USAGE_NOTIFICATIONS_THRESHOLD="\1"/' "${PANEL_DIR}/.env"
-        # shellcheck source=/dev/null
-        . "${PANEL_DIR}/.env"
+        APP_SECRET="$(_envget APP_SECRET "${PANEL_DIR}/.env")"
+        DB_PASSWORD="$(_envget POSTGRES_PASSWORD "${PANEL_DIR}/.env")"
+        METRICS_PASS="$(_envget METRICS_PASS "${PANEL_DIR}/.env")"
+        WEBHOOK_SECRET="$(_envget WEBHOOK_SECRET_HEADER "${PANEL_DIR}/.env")"
         # map legacy values from older installs of this script
-        DB_PASSWORD="${DB_PASSWORD:-${POSTGRES_PASSWORD:-}}"
+        POSTGRES_USER="$(_envget POSTGRES_USER "${PANEL_DIR}/.env")"
+        POSTGRES_DB="$(_envget POSTGRES_DB "${PANEL_DIR}/.env")"
         POSTGRES_USER="${POSTGRES_USER:-postgres}"
         POSTGRES_DB="${POSTGRES_DB:-postgres}"
         info "Existing panel secrets reused from ${PANEL_DIR}/.env"
@@ -1068,8 +1073,7 @@ EOF
 
     # --- subscription page: /opt/remnawave/subscription (own compose + .env) ---
     if [[ -f "${PANEL_DIR}/subscription/.env" ]] && grep -q '^REMNAWAVE_PANEL_URL=' "${PANEL_DIR}/subscription/.env"; then
-        # shellcheck source=/dev/null
-        . "${PANEL_DIR}/subscription/.env"
+        REMNAWAVE_API_TOKEN="$(grep -E '^REMNAWAVE_API_TOKEN=' "${PANEL_DIR}/subscription/.env" 2>/dev/null | head -n1 | cut -d= -f2- | tr -d '"' || true)"
         info "Existing subscription page settings reused from ${PANEL_DIR}/subscription/.env"
     fi
     REMNAWAVE_API_TOKEN="${REMNAWAVE_API_TOKEN:-}"
