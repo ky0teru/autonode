@@ -19,9 +19,10 @@
 #
 #  Two install modes (chosen at startup, or via --mode):
 #    node     — Remnanode only, panel lives on a separate server (Recommended)
-#    combined — Remnawave panel (backend + postgres + valkey + subscription
-#               page) installed on this same server, behind the same nginx
-#               camouflage via SNI routing on 443
+#    combined — Remnawave panel (backend + postgres + redis + subscription
+#               page, docs.rw production layout: /opt/remnawave with separate
+#               /opt/remnawave/subscription compose) installed on this same
+#               server, behind the same nginx camouflage via SNI routing on 443
 #
 #  Usage:  ./install.sh --help
 # =============================================================================
@@ -822,126 +823,204 @@ step "[P1/3] Remnawave panel stack (Postgres, Valkey, subscription page)"
         WEBHOOK_SECRET="$(openssl rand -hex 16 2>/dev/null || head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
     fi
 
-    install -d -m 755 "$PANEL_DIR"
+    # Production layout per the official docs (docs.rw/install):
+    #   /opt/remnawave/                  — panel (docker-compose.yml + .env)
+    #   /opt/remnawave/subscription/     — subscription page (own compose + .env)
+    # The reverse proxy stays on the node's nginx (it owns :443 for REALITY),
+    # so the Caddy compose from the docs is intentionally not deployed.
+    install -d -m 755 "$PANEL_DIR" "${PANEL_DIR}/subscription"
+
+    # Secrets are generated ONCE: Postgres stores the password from the very
+    # first initdb in its volume, so regenerating on re-runs would break auth.
+    if [[ -f "${PANEL_DIR}/.env" ]] && grep -q '^APP_SECRET=' "${PANEL_DIR}/.env"; then
+        # shellcheck source=/dev/null
+        . "${PANEL_DIR}/.env"
+        # map legacy values from older installs of this script
+        DB_PASSWORD="${DB_PASSWORD:-${POSTGRES_PASSWORD:-}}"
+        POSTGRES_USER="${POSTGRES_USER:-postgres}"
+        POSTGRES_DB="${POSTGRES_DB:-postgres}"
+        info "Existing panel secrets reused from ${PANEL_DIR}/.env"
+    else
+        APP_SECRET="$(openssl rand -hex 64 2>/dev/null || head -c 64 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+        METRICS_PASS="$(openssl rand -hex 64 2>/dev/null || head -c 64 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+        WEBHOOK_SECRET="$(openssl rand -hex 64 2>/dev/null || head -c 64 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+        DB_PASSWORD="$(openssl rand -hex 24 2>/dev/null || head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+        POSTGRES_USER="postgres"
+        POSTGRES_DB="postgres"
+    fi
+    METRICS_PASS="${METRICS_PASS:-$DB_PASSWORD}"
+    WEBHOOK_SECRET="${WEBHOOK_SECRET:-$DB_PASSWORD}"
+
     cat > "${PANEL_DIR}/.env" <<EOF
+### APP ###
 APP_PORT=3000
 METRICS_PORT=3001
-APP_SECRET=${APP_SECRET}
-DATABASE_URL=postgresql://remnawave:${DB_PASSWORD}@remnawave-db:5432/remnawave
+
+### API ###
+API_INSTANCES=1
+
+### DATABASE ###
+DATABASE_URL="postgresql://${POSTGRES_USER}:${DB_PASSWORD}@remnawave-db:5432/${POSTGRES_DB}"
+
+### REDIS ###
 REDIS_SOCKET=/var/run/valkey/valkey.sock
+
+### Secrets ###
+APP_SECRET=${APP_SECRET}
+
+### TELEGRAM NOTIFICATIONS ###
+IS_TELEGRAM_NOTIFICATIONS_ENABLED=false
+TELEGRAM_BOT_TOKEN=change_me
+TELEGRAM_NOTIFY_USERS=change_me
+TELEGRAM_NOTIFY_NODES=change_me
+TELEGRAM_NOTIFY_CRM=change_me
+TELEGRAM_NOTIFY_SERVICE=change_me
+TELEGRAM_NOTIFY_TBLOCKER=change_me
+
+### PANEL DOMAIN ###
 PANEL_DOMAIN=${PANEL_DOMAIN}
+
+### FRONT_END ###
 FRONT_END_DOMAIN=${PANEL_DOMAIN}
+
+### SUBSCRIPTION PUBLIC DOMAIN ###
 SUB_PUBLIC_DOMAIN=${SUB_DOMAIN}
+
+### PROMETHEUS ###
 METRICS_USER=admin
-METRICS_PASS=${DB_PASSWORD}
+METRICS_PASS=${METRICS_PASS}
+
+# Webhook configuration
+WEBHOOK_ENABLED=false
+WEBHOOK_URL=https://your-webhook-url.com/endpoint
 WEBHOOK_SECRET_HEADER=${WEBHOOK_SECRET}
-POSTGRES_USER=remnawave
+
+### Bandwidth usage reached notifications
+BANDWIDTH_USAGE_NOTIFICATIONS_ENABLED=false
+BANDWIDTH_USAGE_NOTIFICATIONS_THRESHOLD=[60, 80]
+
+### Short UUID ###
+SHORT_UUID_METHOD=nanoid
+SHORT_UUID_LENGTH=16
+
+# SNI Verification
+SERVICE_SNI_VERIFICATION=true
+
+### Database (for the Postgres Docker container, NOT used by the app itself) ###
+POSTGRES_USER=${POSTGRES_USER}
 POSTGRES_PASSWORD=${DB_PASSWORD}
-POSTGRES_DB=remnawave
+POSTGRES_DB=${POSTGRES_DB}
 EOF
     chmod 600 "${PANEL_DIR}/.env"
 
+    # https://raw.githubusercontent.com/remnawave/backend/refs/heads/main/docker-compose-prod.yml
     cat > "${PANEL_DIR}/docker-compose.yml" <<'EOF'
+x-common: &common
+  ulimits:
+    nofile:
+      soft: 1048576
+      hard: 1048576
+  restart: always
+  networks:
+    - remnawave-network
+
+x-logging: &logging
+  logging:
+    driver: json-file
+    options:
+      max-size: 100m
+      max-file: 5
+
+x-env: &env
+  env_file: .env
+
 services:
   remnawave:
+    image: remnawave/backend:3
     container_name: remnawave
     hostname: remnawave
-    image: remnawave/backend:3
-    restart: always
-    networks:
-      - remnawave-network
-    ports:
-      - "127.0.0.1:3000:3000"
-    env_file:
-      - .env
-    depends_on:
-      - remnawave-db
-      - remnawave-valkey
+    <<: [*common, *logging, *env]
     volumes:
-      - remnawave-sockets:/var/run/valkey
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
+      - valkey-socket:/var/run/valkey
+    ports:
+      - 127.0.0.1:3000:${APP_PORT:-3000}
+      - 127.0.0.1:3001:${METRICS_PORT:-3001}
+    healthcheck:
+      test: ['CMD-SHELL', 'curl -f http://localhost:${METRICS_PORT:-3001}/health']
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    depends_on:
+      remnawave-db:
+        condition: service_healthy
+      remnawave-redis:
+        condition: service_healthy
 
   remnawave-db:
+    image: postgres:18.4
     container_name: remnawave-db
-    image: postgres:18
-    restart: always
-    networks:
-      - remnawave-network
+    hostname: remnawave-db
+    shm_size: 512mb
+    <<: [*common, *logging, *env]
     environment:
-      POSTGRES_USER: remnawave
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-      POSTGRES_DB: remnawave
-      TZ: UTC
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=${POSTGRES_DB}
+      - TZ=UTC # DO NOT CHANGE DATABASE TIMEZONE. IT MUST BE UTC.
+    ports:
+      - 127.0.0.1:6767:5432
     volumes:
       # postgres:18+ requires the mount at /var/lib/postgresql (it creates a
       # major-version subdirectory inside) — /var/lib/postgresql/data is ignored
       - remnawave-db-data:/var/lib/postgresql
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U remnawave"]
-      interval: 5s
-      timeout: 5s
-      retries: 20
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
+      test: ['CMD-SHELL', 'pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}']
+      interval: 3s
+      timeout: 10s
+      retries: 3
 
-  remnawave-valkey:
-    container_name: remnawave-valkey
+  remnawave-redis:
     image: valkey/valkey:9-alpine
-    restart: always
-    networks:
-      - remnawave-network
-    command: >
-      valkey-server --port 0
-      --unixsocket /var/run/valkey/valkey.sock
-      --unixsocketperm 750
-      --save 60 1
-      --appendonly no
+    container_name: remnawave-redis
+    hostname: remnawave-redis
+    <<: [*common, *logging]
     volumes:
-      - remnawave-sockets:/var/run/valkey
-      - remnawave-valkey-data:/data
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
-
-  remnawave-subscription-page:
-    container_name: remnawave-subscription
-    image: remnawave/subscription-page:latest
-    restart: always
-    networks:
-      - remnawave-network
-    ports:
-      - "127.0.0.1:3010:3010"
-    environment:
-      APP_PORT: 3010
-      REMNAWAVE_PANEL_URL: http://remnawave:3000
-      REMNAWAVE_API_TOKEN: ${REMNAWAVE_API_TOKEN:-}
-      TRUST_PROXY: 1
-    depends_on:
-      - remnawave
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
+      - valkey-socket:/var/run/valkey
+    command: >
+      valkey-server
+      --save ""
+      --appendonly no
+      --maxmemory-policy noeviction
+      --loglevel warning
+      --unixsocket /var/run/valkey/valkey.sock
+      --unixsocketperm 777
+      --port 0
+    healthcheck:
+      test: ['CMD', 'valkey-cli', '-s', '/var/run/valkey/valkey.sock', 'ping']
+      interval: 3s
+      timeout: 3s
+      retries: 3
 
 networks:
   remnawave-network:
+    name: remnawave-network
     driver: bridge
+    external: false
 
 volumes:
   remnawave-db-data:
-  remnawave-valkey-data:
-  remnawave-sockets:
+    name: remnawave-db-data
+    driver: local
+    external: false
+  valkey-socket:
+    name: valkey-socket
+    driver: local
+    external: false
 EOF
+
+    # drop containers renamed in the docs-layout restructure (old installs)
+    docker rm -f remnawave-valkey remnawave-subscription >/dev/null 2>&1 || true
 
     docker compose -f "${PANEL_DIR}/docker-compose.yml" up -d
     info "Waiting for the panel API on 127.0.0.1:3000..."
@@ -962,6 +1041,52 @@ EOF
         warn "Panel API did not answer within 60s — it may still be migrating the database."
         warn "Check later: docker logs remnawave"
     fi
+
+    # --- subscription page: /opt/remnawave/subscription (own compose + .env) ---
+    if [[ -f "${PANEL_DIR}/subscription/.env" ]] && grep -q '^REMNAWAVE_PANEL_URL=' "${PANEL_DIR}/subscription/.env"; then
+        # shellcheck source=/dev/null
+        . "${PANEL_DIR}/subscription/.env"
+        info "Existing subscription page settings reused from ${PANEL_DIR}/subscription/.env"
+    fi
+    REMNAWAVE_API_TOKEN="${REMNAWAVE_API_TOKEN:-}"
+    cat > "${PANEL_DIR}/subscription/.env" <<EOF
+APP_PORT=3010
+### Remnawave Panel URL, can be http://remnawave:3000 or https://panel.example.com
+REMNAWAVE_PANEL_URL=http://remnawave:3000
+### Create the token in Remnawave Dashboard -> Settings -> API Tokens,
+### paste it here and run: docker compose -f ${PANEL_DIR}/subscription/docker-compose.yml up -d
+REMNAWAVE_API_TOKEN=${REMNAWAVE_API_TOKEN}
+CUSTOM_SUB_PREFIX=
+MARZBAN_LEGACY_LINK_ENABLED=false
+MARZBAN_LEGACY_SECRET_KEY=
+CADDY_AUTH_API_TOKEN=
+TRUST_PROXY=1
+EOF
+    chmod 600 "${PANEL_DIR}/subscription/.env"
+
+    cat > "${PANEL_DIR}/subscription/docker-compose.yml" <<'EOF'
+services:
+  remnawave-subscription-page:
+    image: remnawave/subscription-page:latest
+    container_name: remnawave-subscription-page
+    hostname: remnawave-subscription-page
+    restart: always
+    env_file:
+      - .env
+    ports:
+      - '127.0.0.1:3010:3010'
+    networks:
+      - remnawave-network
+
+networks:
+  remnawave-network:
+    name: remnawave-network
+    driver: bridge
+    external: true
+EOF
+
+    docker compose -f "${PANEL_DIR}/subscription/docker-compose.yml" up -d
+    ok "Subscription page: /opt/remnawave/subscription (loopback 127.0.0.1:3010)"
 fi
 
 # =============================================================================
@@ -1592,7 +1717,7 @@ echo ""
 step "Verification"
 FAIL=0
 COMBINED_CONTAINERS=()
-[[ "$MODE" == "combined" ]] && COMBINED_CONTAINERS=(remnawave remnawave-db remnawave-valkey remnawave-subscription)
+[[ "$MODE" == "combined" ]] && COMBINED_CONTAINERS=(remnawave remnawave-db remnawave-redis remnawave-subscription-page)
 for svc_name in "${SERVICE_NAME}" remnanode-proxy remnanode "${COMBINED_CONTAINERS[@]}"; do
     STATE="$(docker inspect -f '{{.State.Status}}' "$svc_name" 2>/dev/null || echo missing)"
     if [[ "$STATE" == "running" ]]; then
@@ -1678,8 +1803,8 @@ echo "   3. Then run:  panel-443-off   (hands port 443 over to Xray;"
 echo "      until then the temporary listener serves the panel — panel-443-on"
 echo "      brings it back if needed)."
 echo "   3. Optional: in the panel create an API token (Settings -> API Tokens)"
-echo "      and put it into ${PANEL_DIR}/.env as REMNAWAVE_API_TOKEN, then run:"
-echo "        docker compose -f ${PANEL_DIR}/docker-compose.yml up -d"
+echo "      and put it into ${PANEL_DIR}/subscription/.env as REMNAWAVE_API_TOKEN, then run:"
+echo "        docker compose -f ${PANEL_DIR}/subscription/docker-compose.yml up -d"
 echo "      (this enables the subscription page at https://${SUB_DOMAIN})."
 if [[ "$ENABLE_WARP" == true ]]; then
 echo "   4. WARP is installed but the panel needs direct egress — enable it per"
