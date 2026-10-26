@@ -848,6 +848,8 @@ step "[P1/3] Remnawave panel stack (Postgres, Valkey, subscription page)"
     # Secrets are generated ONCE: Postgres stores the password from the very
     # first initdb in its volume, so regenerating on re-runs would break auth.
     if [[ -f "${PANEL_DIR}/.env" ]] && grep -q '^APP_SECRET=' "${PANEL_DIR}/.env"; then
+        # quote unquoted bracket values — older .env revisions break when sourced
+        sed -i 's/^BANDWIDTH_USAGE_NOTIFICATIONS_THRESHOLD=\([^"].*\)$/BANDWIDTH_USAGE_NOTIFICATIONS_THRESHOLD="\1"/' "${PANEL_DIR}/.env"
         # shellcheck source=/dev/null
         . "${PANEL_DIR}/.env"
         # map legacy values from older installs of this script
@@ -912,7 +914,8 @@ WEBHOOK_SECRET_HEADER=${WEBHOOK_SECRET}
 
 ### Bandwidth usage reached notifications
 BANDWIDTH_USAGE_NOTIFICATIONS_ENABLED=false
-BANDWIDTH_USAGE_NOTIFICATIONS_THRESHOLD=[60, 80]
+# quoted: this .env is also sourced by the shell on re-runs
+BANDWIDTH_USAGE_NOTIFICATIONS_THRESHOLD="[60, 80]"
 
 ### Short UUID ###
 SHORT_UUID_METHOD=nanoid
