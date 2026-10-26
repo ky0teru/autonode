@@ -77,6 +77,21 @@ apt_install() {
     apt-get -y -o DPkg::Lock::Timeout=300 install "$@"
 }
 
+# Pull an image with retries: routes to Docker Hub from some VPS providers
+# drop mid-download ("connection reset by peer"). Partially downloaded layers
+# are cached by Docker, so each retry resumes where the previous one stopped.
+pull_retry() {
+    local img="$1" attempts="${2:-6}"
+    docker image inspect "$img" >/dev/null 2>&1 && return 0
+    local i
+    for ((i = 1; i <= attempts; i++)); do
+        if docker pull "$img"; then return 0; fi
+        warn "Pull of ${img} failed (attempt ${i}/${attempts}) — retrying in 5s"
+        sleep 5
+    done
+    die "Could not pull ${img} after ${attempts} attempts — check the server's route to Docker Hub (try a registry mirror or a VPN)."
+}
+
 # =============================================================================
 #  Usage (--help must work without root)
 # =============================================================================
@@ -1022,6 +1037,12 @@ EOF
     # drop containers renamed in the docs-layout restructure (old installs)
     docker rm -f remnawave-valkey remnawave-subscription >/dev/null 2>&1 || true
 
+    # Pre-pull images with retries (see pull_retry) so `compose up` cannot
+    # die on a flaky route to Docker Hub.
+    pull_retry remnawave/backend:3
+    pull_retry postgres:18.4
+    pull_retry valkey/valkey:9-alpine
+
     docker compose -f "${PANEL_DIR}/docker-compose.yml" up -d
     info "Waiting for the panel API on 127.0.0.1:3000..."
     _panel_up=""
@@ -1085,6 +1106,7 @@ networks:
     external: true
 EOF
 
+    pull_retry remnawave/subscription-page:latest
     docker compose -f "${PANEL_DIR}/subscription/docker-compose.yml" up -d
     ok "Subscription page: /opt/remnawave/subscription (loopback 127.0.0.1:3010)"
 fi
@@ -1328,6 +1350,7 @@ services:
         max-size: "10m"
         max-file: "3"
 EOF
+pull_retry "${SERVICE_IMAGE}"
 docker compose -f "/opt/${SERVICE_NAME}/docker-compose.yml" up -d
 
 # =============================================================================
@@ -1469,6 +1492,7 @@ ${NGINX_EXTRA_MOUNTS}
         max-file: "3"
     command: sh -c 'rm -f /dev/shm/nginx.sock && exec nginx -g "daemon off;"'
 EOF
+pull_retry "nginx:stable"
 docker compose -f "${NODE_DIR}/nginx/docker-compose.yml" up -d
 
 # =============================================================================
@@ -1629,6 +1653,7 @@ services:
       NODE_PORT: "${NODE_PORT}"
       SECRET_KEY: "${SECRET_KEY}"
 EOF
+pull_retry "remnawave/node:latest"
 docker compose -f "${NODE_DIR}/docker-compose.yml" up -d
 
 # =============================================================================
